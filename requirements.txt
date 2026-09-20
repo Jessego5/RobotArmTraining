@@ -1,0 +1,11 @@
+# Video recording, replay, and dataset rendering.
+opencv-python
+numpy
+mujoco
+
+# Mesh preparation only -- needed by sim/prep_meshes.py, not at runtime.
+trimesh
+
+# Window and held-key input for teleop/keyboard.py. Already a mujoco
+# dependency; listed because that module imports it directly.
+glfw
