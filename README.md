@@ -80,6 +80,46 @@ Render shoulder/wrist observations for the VLA dataset pipeline:
 python teleop/render_vla_dataset.py
 ```
 
+## Model rollout
+
+`rollout.py` runs the LoRA VLA-Adapter checkpoint produced by the training
+notebook in the same two-camera MuJoCo environment. It accepts an extracted
+checkpoint, the notebook's `.tar.gz`, or a Google Drive `.zip`; with no
+`--checkpoint` it uses the newest `robot-arm-learning*` artifact in
+`~/Downloads`. Archive extraction omits the optimizer state, which is not
+needed for inference.
+
+The script automatically restarts itself in the project's existing
+`~/venvs/vla-adapter` environment, so it can be launched with plain `python`.
+Install the simulation dependencies into that environment once:
+
+```bash
+~/venvs/vla-adapter/bin/python -m pip install -r requirements.txt
+```
+
+Then run a real-time rollout. It continues until you press `q`; press `r` to
+reset the arm and start with a newly randomized cube layout:
+
+```bash
+python rollout.py
+```
+
+The first run downloads the 2.5 GiB base model and may also populate the
+Hugging Face cache with its Qwen/DINO/SigLIP backbones. Useful options:
+
+```bash
+# Save a headless 20-second rollout using a particular artifact.
+python rollout.py \
+  --checkpoint ~/Downloads/robot-arm-learning-colab-*.zip \
+  --steps 200 --no-display --video rollouts/test.mp4
+
+# Re-query every control step instead of executing all 8 predicted actions.
+python rollout.py --open-loop 1
+
+# Run a finite 60-second interactive rollout instead of running indefinitely.
+python rollout.py --steps 600
+```
+
 ## Simulation
 
 The model has six revolute joints, a parallel gripper, a table, and three free

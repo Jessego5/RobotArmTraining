@@ -19,8 +19,11 @@ from scipy.spatial.transform import Rotation
 class RobotArmLearningPanthera(tfds.core.GeneratorBasedBuilder):
     """Two-camera Panthera demonstrations recorded by RobotArmLearning."""
 
-    VERSION = tfds.core.Version("1.0.0")
-    RELEASE_NOTES = {"1.0.0": "Initial shoulder+wrist RobotArmLearning dataset."}
+    VERSION = tfds.core.Version("1.0.1")
+    RELEASE_NOTES = {
+        "1.0.0": "Initial shoulder+wrist RobotArmLearning dataset.",
+        "1.0.1": "Correct the POS_EULER padding field in proprioceptive state.",
+    }
 
     def __init__(self, *args, rendered_dir: Path, instruction: str, **kwargs):
         self.rendered_dir = Path(rendered_dir).resolve()
@@ -77,7 +80,7 @@ class RobotArmLearningPanthera(tfds.core.GeneratorBasedBuilder):
             state = np.concatenate([
                 ee_pos,
                 euler,
-                (0.04 * gripper)[:, None],
+                np.zeros((len(gripper), 1), dtype=np.float32),
                 (0.04 * gripper)[:, None],
             ], axis=1).astype(np.float32)
 
