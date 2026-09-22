@@ -33,10 +33,12 @@ can. Four at once turns both into something you read directly: the wrist view
 answers left-right and the overhead answers how far forward, and neither has to
 be inferred from the other.
 
-The two fixed cameras live in the model rather than in this script, so anything
-else rendering the scene gets the same viewpoints. A number key blows one view
-up to fill the window and the same key again brings the other three back; `g`
-always returns to the grid, and `--view` picks what to start with.
+The two fixed cameras live in the model rather than in this script. The teleop
+wrist preview is roll-stabilized to keep the operator's horizon steady; dataset
+and policy renderers use the true wrist-camera pose, including roll. A number
+key blows one view up to fill the window and the same key again brings the
+other three back; `g` always returns to the grid, and `--view` picks what to
+start with.
 
 `sim.mp4` records the window as it stands, so by default it is a 640x480
 four-up mosaic -- about 320x240 a tile. Focus
@@ -58,10 +60,11 @@ Controls
     u / j    pitch the gripper up / down      (about base y)
     i / k    yaw left / right                 (about base z)
     n / m    roll                             (about base x)
+    side-scroll  roll                         (right / left = + / -)
     o / l    open / close the gripper
     [ / ]    slower / faster
     c        re-centre the target on the arm (after reaching out of range)
-    r        reset the arm to home and discard the unsaved take
+    r        reset the arm near home and discard the unsaved take
     e        save the current take (recording starts automatically on movement)
     x        discard the episode in progress
     f        Minecraft look on / off
@@ -69,8 +72,9 @@ Controls
 
     1 2 3 4  fill the window with shoulder / wrist / overhead / chase
     g        back to all four
-    drag / scroll  orbit and zoom -- acts on whichever view the pointer is over
-                   (the wrist and overhead cameras are fixed and do not move)
+    drag / vertical scroll  orbit and zoom -- acts on whichever view the
+                            pointer is over (the wrist and overhead cameras
+                            are fixed and do not move)
 
     Minecraft look (`f` / `--minecraft`)
     w / s    forward / back on the heading (level, not along the look)
@@ -78,6 +82,7 @@ Controls
     SPACE    up                               (world +z, always)
     SHIFT    down                             (world -z, always)
     mouse    yaw / pitch the gripper
+    side-scroll  roll about the look axis
     l-click  close the gripper
     r-click  open the gripper
     n / m    roll about the look axis
@@ -111,6 +116,42 @@ from episode import Episode, next_episode_dir  # noqa: E402
 DEFAULT_OUT = REPO_ROOT / "data"
 VIEW_AZIMUTH, VIEW_ELEVATION, VIEW_DISTANCE = 14.0, -34.0, 1.20
 VIEW_LOOKAT = (0.44, 0.0, 0.12)
+DEFAULT_ARM_START_RANGE = (0.30, 0.48, -0.16, 0.16, 0.10, 0.40)
+SCROLL_ROLL_STEP = np.deg2rad(5.0)
+
+
+def randomize_arm_start(sim: PantheraSim, start_range, rng=None) -> None:
+    """Place the arm at a random reachable point in a Cartesian box.
+
+    A downward grasp orientation makes low tabletop-adjacent starts reachable;
+    the home orientation cannot reach much below 17 cm. This is a teleport
+    before recording, so the first command has no artificial slew.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    bounds = np.asarray(start_range, dtype=float)
+    lo = bounds[[0, 2, 4]]
+    hi = bounds[[1, 3, 5]]
+    pitch = np.deg2rad(30.0)
+    grasp_quat = mat_to_quat(np.array([
+        [np.cos(pitch), 0.0, np.sin(pitch)],
+        [0.0, 1.0, 0.0],
+        [-np.sin(pitch), 0.0, np.cos(pitch)],
+    ]))
+
+    # Rejection keeps this usable with custom ranges that partly extend beyond
+    # the workspace. The default range almost always succeeds on its first try.
+    for _ in range(100):
+        target = rng.uniform(lo, hi)
+        q, pos_err, rot_err = sim.ik(
+            target, grasp_quat, q_init=sim.q, max_joint_step=None)
+        if pos_err <= 1e-3 and rot_err <= 1e-3:
+            break
+    else:
+        return
+    sim.data.qpos[sim.arm_qadr] = q
+    sim.data.qvel[sim.arm_dofadr] = 0.0
+    sim.set_arm_ctrl(q)
+    mujoco.mj_forward(sim.model, sim.data)
 
 
 def _add_geom(scene, geom_type, size, pos, rgba) -> None:
@@ -253,6 +294,7 @@ class Input:
         # of orbiting a camera, and the OS cursor is hidden and captured.
         self.fps_look = False
         self.look_delta = np.zeros(2)
+        self.roll_delta = 0.0
         self._look_armed = False
         glfw.set_key_callback(window, self._on_key)
         glfw.set_cursor_pos_callback(window, self._on_move)
@@ -328,6 +370,10 @@ class Input:
         mujoco.mjv_moveCamera(self.model, act, dx / h, dy / h, self.scene, cam)
 
     def _on_scroll(self, window, dx, dy):
+        # GLFW reports horizontal and vertical scrolling independently. Keep
+        # vertical scrolling for camera zoom, and make a horizontal wheel or
+        # two-finger side-scroll roll the commanded gripper in either mode.
+        self.roll_delta += dx
         if self.fps_look:
             return
         cam = self.under_cursor()
@@ -357,6 +403,11 @@ class Input:
         self.look_delta[:] = 0
         return d
 
+    def drain_roll(self) -> float:
+        d = self.roll_delta
+        self.roll_delta = 0.0
+        return d
+
     def held(self, key) -> bool:
         return glfw.get_key(self.window, key) == glfw.PRESS
 
@@ -380,6 +431,35 @@ def quat_to_mat(q: np.ndarray) -> np.ndarray:
     m = np.zeros(9)
     mujoco.mju_quat2Mat(m, np.asarray(q, dtype=float))
     return m.reshape(3, 3)
+
+
+def roll_stabilized_camera_pose(model: mujoco.MjModel,
+                                data: mujoco.MjData,
+                                camera_id: int) -> tuple[np.ndarray, np.ndarray]:
+    """World pose for a body camera with its parent body's roll removed.
+
+    This is used only by the interactive wrist preview. It preserves the
+    camera's local mount position and tilt, and follows the gripper's position,
+    yaw, and pitch, but constructs a level parent frame from the approach axis.
+    The model camera and ``data.cam_*`` remain unchanged for other renderers.
+    """
+    body_id = model.cam_bodyid[camera_id]
+    body_R = data.xmat[body_id].reshape(3, 3)
+    forward = body_R[:, 0]
+    world_up = np.array([0.0, 0.0, 1.0])
+    left = np.cross(world_up, forward)
+    norm = np.linalg.norm(left)
+    if norm < 1e-8:
+        # The regular teleop pitch limit avoids this pole, but world-frame
+        # controls can still reach it. Choose a deterministic level axis.
+        left = np.cross(np.array([1.0, 0.0, 0.0]), forward)
+        norm = np.linalg.norm(left)
+    left /= norm
+    up = np.cross(forward, left)
+    level_body_R = np.column_stack((forward, left, up))
+    camera_R = level_body_R @ quat_to_mat(model.cam_quat[camera_id])
+    camera_pos = data.xpos[body_id] + level_body_R @ model.cam_pos[camera_id]
+    return camera_pos, camera_R
 
 
 def look_from_quat(q: np.ndarray) -> tuple[float, float, float]:
@@ -450,6 +530,11 @@ def main() -> None:
     ap.add_argument("--max-duration", type=float, default=60.0,
                     help="maximum seconds in one automatically started take "
                          "(default 60)")
+    ap.add_argument("--arm-start-range", type=float, nargs=6,
+                    default=DEFAULT_ARM_START_RANGE,
+                    metavar=("X0", "X1", "Y0", "Y1", "Z0", "Z1"),
+                    help="box for random initial end-effector positions "
+                         "(default: x .30-.48, y -.16-.16, z .10-.40 m)")
     ap.add_argument("--view", choices=("grid",) + VIEWS, default="grid",
                     help="start with all four views (default) or one of them "
                          "filling the window; 1-4 and g switch at any time")
@@ -469,8 +554,12 @@ def main() -> None:
 
     if args.max_duration <= 0:
         ap.error("--max-duration must be greater than zero")
+    if any(args.arm_start_range[i] >= args.arm_start_range[i + 1]
+           for i in (0, 2, 4)):
+        ap.error("each --arm-start-range lower bound must be below its upper bound")
 
     sim = PantheraSim()
+    randomize_arm_start(sim, args.arm_start_range)
     lo = np.array([min(args.region[0], args.region[1]),
                    min(args.region[2], args.region[3]),
                    min(args.region[4], args.region[5])])
@@ -523,6 +612,7 @@ def main() -> None:
         "yaw_limit_deg": args.yaw_limit,
         "arm_joints": ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
         "gripper_open_m": 0.04,
+        "arm_start_range_m": list(args.arm_start_range),
         "objects": sim.object_names,
         "region": [lo.tolist(), hi.tolist()],
         # What sim.mp4 shows: one view's name, or "grid" for all four.
@@ -621,11 +711,12 @@ def main() -> None:
                     recording = False
                     motion_armed = False
                 sim.reset()
+                randomize_arm_start(sim, args.arm_start_range)
                 q_cmd = sim.q.copy()
                 tp, tq = (p.copy() for p in sim.ee_pose())
                 look[:] = sync_look(tq)
                 stuck_n = 0
-                print("arm reset to home")
+                print("arm reset near home")
             elif key == glfw.KEY_C:
                 # The commanded frame is free to run past the arm's reach, so
                 # it can end up somewhere the gripper never followed it to.
@@ -700,6 +791,7 @@ def main() -> None:
         moving = bool(np.linalg.norm(v) > 0)
         tp = np.clip(tp + v * args.speed * gain * dt, lo, hi)
 
+        scroll_roll = inp.drain_roll()
         if minecraft and not args.rotation:
             inp.drain_look()
         if args.rotation:
@@ -730,12 +822,20 @@ def main() -> None:
                 if inp.held(glfw.KEY_M):
                     roll -= step
                     moving = True
+                if scroll_roll:
+                    roll += scroll_roll * SCROLL_ROLL_STEP * gain
+                    moving = True
                 look[:] = (float(np.clip(yaw, -yaw_limit, yaw_limit)),
                            float(np.clip(pitch, -PITCH_LIMIT, PITCH_LIMIT)),
                            roll)
                 yaw, pitch, roll = look
                 tq = quat_from_look(yaw, pitch, roll)
             else:
+                if scroll_roll:
+                    moving = True
+                    tq = quat_mul(
+                        axis_angle_quat(0, scroll_roll * SCROLL_ROLL_STEP * gain),
+                        tq)
                 for key, (axis, sign) in ROTATE.items():
                     if inp.held(key):
                         moving = True
@@ -787,8 +887,28 @@ def main() -> None:
         layout = tiles(views, focus, w, h)
         inp.tiles = layout
         for name, r in layout:
-            mujoco.mjv_updateScene(sim.model, sim.data, opt, None, cams[name],
-                                   mujoco.mjtCatBit.mjCAT_ALL.value, scene)
+            if name == "wrist":
+                # Level only this interactive preview. mjv_updateScene copies
+                # the pose into `scene`, after which the real model pose is put
+                # back so episode/model rendering still sees physical roll.
+                camera_id = cams[name].fixedcamid
+                camera_pos = sim.data.cam_xpos[camera_id].copy()
+                camera_xmat = sim.data.cam_xmat[camera_id].copy()
+                stable_pos, stable_R = roll_stabilized_camera_pose(
+                    sim.model, sim.data, camera_id)
+                sim.data.cam_xpos[camera_id] = stable_pos
+                sim.data.cam_xmat[camera_id] = stable_R.ravel()
+                try:
+                    mujoco.mjv_updateScene(
+                        sim.model, sim.data, opt, None, cams[name],
+                        mujoco.mjtCatBit.mjCAT_ALL.value, scene)
+                finally:
+                    sim.data.cam_xpos[camera_id] = camera_pos
+                    sim.data.cam_xmat[camera_id] = camera_xmat
+            else:
+                mujoco.mjv_updateScene(
+                    sim.model, sim.data, opt, None, cams[name],
+                    mujoco.mjtCatBit.mjCAT_ALL.value, scene)
             if name != "wrist":
                 # From the wrist the ball is a few centimetres off the lens and
                 # fills the frame, hiding the jaws it is there to be compared
@@ -825,14 +945,16 @@ def main() -> None:
         views_help = ("all four views" if not focus
                       else f"{focus} -- press again for all")
         if minecraft:
-            keys = ("wasd / space / shift\nmouse   n m\nlmb / rmb\n1 2 3 4 / g\nc\nr\n"
+            keys = ("wasd / space / shift\nmouse   n m   side-scroll\nlmb / rmb\n"
+                    "1 2 3 4 / g\nc\nr\n"
                     "e / x\nf / esc\nq")
             labels = ("move (heading)\nlook / roll\nclose / open\n"
                       + views_help
                       + "\nre-centre target\nreset\nsave / discard\n"
                         "world-frame keys\nquit")
         else:
-            keys = ("wasd / space / shift\nu j   i k   n m\no l\n1 2 3 4 / g\nc\nr\n"
+            keys = ("wasd / space / shift\nu j   i k   n m / side-scroll\no l\n"
+                    "1 2 3 4 / g\nc\nr\n"
                     "e / x\nf\nq")
             labels = ("move\npitch yaw roll\ngripper\n"
                       + views_help

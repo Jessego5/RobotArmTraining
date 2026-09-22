@@ -19,15 +19,28 @@ from scipy.spatial.transform import Rotation
 class RobotArmLearningPanthera(tfds.core.GeneratorBasedBuilder):
     """Two-camera Panthera demonstrations recorded by RobotArmLearning."""
 
-    VERSION = tfds.core.Version("1.0.1")
+    VERSION = tfds.core.Version("1.1.0")
     RELEASE_NOTES = {
         "1.0.0": "Initial shoulder+wrist RobotArmLearning dataset.",
         "1.0.1": "Correct the POS_EULER padding field in proprioceptive state.",
+        "1.1.0": "Add a deterministic episode-level validation split.",
     }
 
-    def __init__(self, *args, rendered_dir: Path, instruction: str, **kwargs):
+    def __init__(
+        self,
+        *args,
+        rendered_dir: Path,
+        instruction: str,
+        val_fraction: float = 0.1,
+        split_seed: int = 20260920,
+        **kwargs,
+    ):
         self.rendered_dir = Path(rendered_dir).resolve()
         self.instruction = instruction
+        if not 0.0 < val_fraction < 1.0:
+            raise ValueError("val_fraction must be between 0 and 1")
+        self.val_fraction = val_fraction
+        self.split_seed = split_seed
         super().__init__(*args, **kwargs)
 
     def _info(self) -> tfds.core.DatasetInfo:
@@ -65,7 +78,22 @@ class RobotArmLearningPanthera(tfds.core.GeneratorBasedBuilder):
         )
         if not episodes:
             raise FileNotFoundError(f"no rendered episodes in {self.rendered_dir}")
-        return {"train": self._generate_examples(episodes)}
+        if len(episodes) < 2:
+            raise ValueError("at least two episodes are required for train/validation splits")
+
+        # Split whole demonstrations, never frames. A frame-level split would put
+        # near-identical neighboring observations on both sides and make validation
+        # loss look much better than closed-loop generalization really is.
+        rng = np.random.default_rng(self.split_seed)
+        shuffled = [episodes[index] for index in rng.permutation(len(episodes))]
+        val_count = min(len(episodes) - 1, max(1, round(len(episodes) * self.val_fraction)))
+        val_names = {episode.name for episode in shuffled[:val_count]}
+        train_episodes = [episode for episode in episodes if episode.name not in val_names]
+        val_episodes = [episode for episode in episodes if episode.name in val_names]
+        return {
+            "train": self._generate_examples(train_episodes),
+            "val": self._generate_examples(val_episodes),
+        }
 
     def _generate_examples(self, episodes):
         for episode in episodes:
@@ -124,6 +152,10 @@ def main() -> None:
                         default=Path("data/robot_arm_learning_rendered"))
     parser.add_argument("--data-dir", type=Path, default=Path("data/robot_arm_learning"))
     parser.add_argument("--instruction", default="stack the three colored cubes")
+    parser.add_argument("--val-fraction", type=float, default=0.1,
+                        help="fraction of complete episodes reserved for validation")
+    parser.add_argument("--split-seed", type=int, default=20260920,
+                        help="seed for the deterministic episode-level split")
     parser.add_argument("--rebuild", action="store_true",
                         help="regenerate TFRecords after adding rendered episodes")
     args = parser.parse_args()
@@ -135,6 +167,8 @@ def main() -> None:
         data_dir=str(args.data_dir),
         rendered_dir=args.rendered_dir,
         instruction=args.instruction,
+        val_fraction=args.val_fraction,
+        split_seed=args.split_seed,
     )
     download_config = tfds.download.DownloadConfig(
         download_mode=(

@@ -19,10 +19,11 @@ a / d   left / right   (+y / -y)      i / k   yaw
 SPACE   up                             n / m   roll
 SHIFT   down                           o / l   gripper open / close
 [ / ]   slower / faster               c       re-centre target
-r       reset arm                     e       save take
+r       reset arm near home           e       save take
 x       discard take                  q       quit
 1-4     focus a view                  g       show all four views
 f       toggle Minecraft-style mouse look
+side-scroll   roll the gripper (right / left = + / -)
 ```
 
 Recording begins automatically when a movement or gripper command is made.
@@ -30,8 +31,10 @@ Press `e` to save the current take under `data/episode_NNN/`. The default
 60-second limit can be changed with `--max-duration`, and `--no-video` records
 only arrays.
 
-Run `python teleop/keyboard.py --help` for speed, workspace, window, view, and
-mouse-look options.
+The arm starts at a random reachable position spanning 10–40 cm in height, and
+`r` samples a new position. Use `--arm-start-range X0 X1 Y0 Y1 Z0 Z1` to tune
+the distribution. Run `python teleop/keyboard.py --help` for speed, workspace,
+window, view, and mouse-look options.
 
 ## Views and mouse-look
 
@@ -44,8 +47,13 @@ The window shows four views:
 | `3` | overhead | table position and depth |
 | `4` | chase | overview following the wrist |
 
-Press a number again or `g` to return to the grid. Drag and scroll orbit the
-movable shoulder and chase views.
+The interactive wrist view is roll-stabilized, so rolling the gripper does not
+spin the operator's view. This affects only teleoperation: the wrist images
+rendered for model training retain the camera's physical roll.
+
+Press a number again or `g` to return to the grid. Drag and vertical-scroll to
+orbit and zoom the movable shoulder and chase views. Horizontal side-scrolling
+rolls the gripper; it also works while Minecraft-style mouse look is active.
 
 With `f` or `--minecraft`, the mouse aims the gripper and WASD moves on its
 level heading. SPACE and SHIFT remain world-up and world-down; mouse buttons
@@ -79,6 +87,91 @@ Render shoulder/wrist observations for the VLA dataset pipeline:
 ```bash
 python teleop/render_vla_dataset.py
 ```
+
+## LeRobot ACT experiment
+
+The same demonstrations can be converted to LeRobot 0.4.4 and used to train
+an ACT policy locally. The converter uses both shoulder and wrist images,
+seven-dimensional joint/gripper state, and the next 10 Hz joint target as the
+action:
+
+```bash
+uv venv .venv-act --python 3.10
+uv pip install --python .venv-act/bin/python lerobot==0.4.4 mujoco
+uv pip uninstall --python .venv-act/bin/python opencv-python-headless
+uv pip install --python .venv-act/bin/python opencv-python==4.12.0.88
+.venv-act/bin/python teleop/build_lerobot_dataset.py
+.venv-act/bin/python tools/lerobot_image_cache.py outputs/lerobot/panthera_stack
+.venv-act/bin/python train_act.py
+python rollout_act.py --steps 150 --no-display --no-realtime --video outputs/act/rollout.mp4
+```
+
+Run an ACT checkpoint interactively until you quit. Press `r` to randomize the
+cube layout and arm start, or `q` to close the rollout:
+
+```bash
+python rollout_act.py --checkpoint outputs/act/panthera_stack_full
+```
+
+Temporal ensembling is enabled by default to smooth transitions between ACT
+action chunks. Pass `--no-temporal-ensemble` to compare against the checkpoint's
+original 10-step open-loop action queue.
+
+## RL fine-tuning ACT for three-block stacking
+
+`train_act_rl.py` continues from the imitation checkpoint with PPO. It freezes
+ACT's visual backbone and transformer, caches the first decoder feature during
+rollout, and updates the shared ACT action head. A privileged state critic is
+used only while training; the exported policy still consumes the same shoulder
+image, wrist image, and seven-dimensional robot state as before.
+
+The shaped reward pays for *changes* in reaching, grasping, lifting, a supported
+two-cube pair, and a table-supported three-cube chain. A three-cube stack must
+remain valid for five control ticks before the episode succeeds. This avoids
+the common failure mode where a policy earns reward indefinitely by hovering
+near a block. The last cube also has to be released. Training prints rolling
+exploratory grasp/two-stack/three-stack rates, height, throughput, and PPO
+diagnostics. Every 50 updates it separately evaluates the deterministic policy
+over 10 episodes. It writes all stats to JSONL and saves resumable ACT
+checkpoints every ten updates:
+
+```bash
+python train_act_rl.py \
+  --checkpoint outputs/act/panthera_stack_full \
+  --output outputs/act_rl/panthera_stack \
+  --num-envs 12 --env-workers 4
+
+# Resume the most recent checkpoint shown in latest.json.
+python train_act_rl.py \
+  --resume outputs/act_rl/panthera_stack/checkpoint_000100 \
+  --output outputs/act_rl/panthera_stack \
+  --num-envs 12 --env-workers 4
+
+# RL checkpoints use first-action receding-horizon inference by default.
+python rollout_act.py \
+  --checkpoint outputs/act_rl/panthera_stack/checkpoint_000100
+```
+
+`--env-workers` runs independent MuJoCo/EGL worker processes and exchanges
+camera frames, actions, rewards, and critic state through shared memory. Four
+workers is the default; each owns an even share of `--num-envs`. Pass
+`--env-workers 1` for the original serial loop. Other useful overrides are
+`--rollout-steps`, `--episode-steps`, `--checkpoint-freq`, and `--updates`.
+
+The simulator backend is MuJoCo, not MJX: the task's compliant-pad grasp assist
+toggles equality constraints from contact state, and both ACT cameras must
+still be rendered by MuJoCo. Moving physics alone to MJX would not preserve
+those task dynamics or remove the rendering bottleneck.
+
+`tools/benchmark_act_batch.py` measures both GPU-only and end-to-end training
+throughput. On the RTX 4060 Laptop GPU used for this experiment, batch 12 was
+the fastest sustained end-to-end size; larger batches used the GPU more
+efficiently but lost that gain while decoding the embedded camera images.
+The optional decoded-image cache is about 10 GiB for this dataset. It preserves
+the exact RGB pixels, is memory-mapped rather than loaded into RAM, and lets
+training bypass PNG decoding and the large embedded Parquet image columns.
+Training discovers the default cache automatically; pass `--no-image-cache`
+to compare against the original path.
 
 ## Model rollout
 

@@ -35,6 +35,7 @@ VLA_REPOSITORY = "https://github.com/OpenHelix-Team/VLA-Adapter.git"
 BASE_MODEL_REPOSITORY = "Stanford-ILIAD/prism-qwen25-extra-dinosiglip-224px-0_5b"
 BASE_CHECKPOINT = "checkpoints/step-020792-epoch-01-loss=0.5268.pt"
 UNNORM_KEY = "robot_arm_learning_panthera"
+ROLLOUT_START_Z = 0.20  # Metres above the world origin.
 REQUIRED_CHECKPOINT_FILES = (
     "dataset_statistics.json",
     "action_head--latest_checkpoint.pt",
@@ -442,7 +443,33 @@ def rollout(args, policy) -> None:
     from render_vla_dataset import shoulder_camera, wrist_camera
 
     sim = PantheraSim()
-    sim.reset(randomize=not args.fixed_scene, rng=np.random.default_rng(args.seed))
+
+    def reset_scene(seed: int) -> tuple[np.ndarray, np.ndarray]:
+        sim.reset(
+            randomize=not args.fixed_scene,
+            rng=np.random.default_rng(seed),
+        )
+        start_pos, start_quat = sim.ee_pose()
+        start_pos[2] = ROLLOUT_START_Z
+        start_q, pos_error, rot_error = sim.ik(
+            start_pos,
+            start_quat,
+            q_init=sim.q,
+            max_joint_step=None,
+        )
+        if pos_error > 0.005 or rot_error > math.radians(1.0):
+            raise RuntimeError(
+                "Could not lower the rollout start pose "
+                f"(IK error {pos_error * 1000:.1f} mm, "
+                f"{math.degrees(rot_error):.1f} deg)"
+            )
+        sim.data.qpos[sim.arm_qadr] = start_q
+        sim.data.qvel[sim.arm_dofadr] = 0.0
+        sim.set_arm_ctrl(start_q)
+        mujoco.mj_forward(sim.model, sim.data)
+        return sim.ee_pose()
+
+    target_pos, target_quat = reset_scene(args.seed)
     renderers = (
         mujoco.Renderer(sim.model, height=256, width=256),
         mujoco.Renderer(sim.model, height=256, width=256),
@@ -460,6 +487,10 @@ def rollout(args, policy) -> None:
     physics_steps = max(1, round((1.0 / args.hz) / sim.dt))
     action_queue: list[np.ndarray] = []
     last_action = None
+    # Actions are frame-to-frame pose deltas.  Integrate them into a commanded
+    # pose rather than repeatedly applying them to the measured pose: the
+    # latter turns gravity/servo tracking error into a new target every tick
+    # and makes even an all-zero action sequence drift downward.
     limit = f"{args.steps} control steps" if args.steps else "until you quit"
     print(
         f"Rolling out '{args.instruction}' {limit} at {args.hz:g} Hz "
@@ -492,10 +523,12 @@ def rollout(args, policy) -> None:
             if action.shape != (7,) or not np.isfinite(action).all():
                 raise RuntimeError(f"Policy returned invalid action: {action}")
             action[:6] *= args.action_scale
-            target_pos = sim.ee_pos() + action[:3]
+            target_pos = target_pos + action[:3]
             delta_quat = rotvec_quat(action[3:6])
-            target_quat = np.zeros(4)
-            mujoco.mju_mulQuat(target_quat, delta_quat, sim.ee_quat())
+            next_target_quat = np.zeros(4)
+            mujoco.mju_mulQuat(next_target_quat, delta_quat, target_quat)
+            mujoco.mju_normalize4(next_target_quat)
+            target_quat = next_target_quat
             q_target, pos_error, rot_error = sim.ik(
                 target_pos, target_quat, q_init=sim.q, max_joint_step=args.max_joint_step
             )
@@ -529,10 +562,7 @@ def rollout(args, policy) -> None:
             if key == ord("r"):
                 reset_count += 1
                 reset_seed = args.seed + reset_count
-                sim.reset(
-                    randomize=not args.fixed_scene,
-                    rng=np.random.default_rng(reset_seed),
-                )
+                target_pos, target_quat = reset_scene(reset_seed)
                 action_queue.clear()
                 last_action = None
                 step = 0

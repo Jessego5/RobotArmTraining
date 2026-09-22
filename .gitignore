@@ -10,6 +10,7 @@ htmlcov/
 
 # Virtual environments
 .venv/
+.venv-*/
 venv/
 env/
 
@@ -39,3 +40,4 @@ MUJOCO_LOG.TXT
 
 # External checkout used by the VLA data pipeline
 /VLA-Adapter/
+/outputs/
