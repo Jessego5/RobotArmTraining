@@ -68,10 +68,78 @@ def sample_indices(t: np.ndarray, hz: float) -> np.ndarray:
     return np.unique(indices)
 
 
+class FingerPoser:
+    """Pose the fingers for a kinematic replay frame.
+
+    Recordings keep only the gripper *command*, not the finger joints, and a
+    replay has no dynamics to move them.  The command is used as the opening
+    unless it would drive a finger into a cube; then the fingers are widened to
+    where they first touch it, which is where the real fingers stop.
+    """
+
+    PENETRATION_TOL = 5e-4  # metres
+    SEARCH_ITERS = 14
+
+    def __init__(self, sim: PantheraSim) -> None:
+        model = sim.model
+        self.sim = sim
+        self.left_qadr = model.jnt_qposadr[
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "L_finger_joint")]
+        self.right_qadr = model.jnt_qposadr[
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "R_finger_joint")]
+        self.finger_bodies = {
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+            for name in ("L_finger", "R_finger")}
+        self.finger_bodies.discard(-1)
+        if len(self.finger_bodies) != 2:
+            raise SystemExit("scene has no L_finger/R_finger bodies")
+        self.object_bodies = set(sim.object_bodies)
+        self.max_opening = float(model.jnt_range[
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "L_finger_joint"), 1])
+
+    def _set(self, opening: float) -> None:
+        self.sim.data.qpos[self.left_qadr] = opening
+        self.sim.data.qpos[self.right_qadr] = -opening
+        mujoco.mj_forward(self.sim.model, self.sim.data)
+
+    def _penetrates(self) -> bool:
+        data, body = self.sim.data, self.sim.model.geom_bodyid
+        for contact in data.contact[:data.ncon]:
+            if contact.dist >= -self.PENETRATION_TOL:
+                continue
+            pair = {body[contact.geom1], body[contact.geom2]}
+            if pair & self.finger_bodies and pair & self.object_bodies:
+                return True
+        return False
+
+    def pose(self, commanded: float) -> float:
+        """Set the finger joints (then mj_forward) and return the opening."""
+        low = float(np.clip(commanded, 0.0, self.max_opening))
+        self._set(low)
+        if not self._penetrates():
+            return low
+        high = self.max_opening
+        self._set(high)
+        if self._penetrates():
+            # Something is inside the gripper even fully open; keep the command.
+            self._set(low)
+            return low
+        for _ in range(self.SEARCH_ITERS):
+            mid = 0.5 * (low + high)
+            self._set(mid)
+            if self._penetrates():
+                low = mid
+            else:
+                high = mid
+        self._set(high)
+        return high
+
+
 def render_episode(path: Path, output: Path, sim: PantheraSim,
                    renderers: tuple[mujoco.Renderer, mujoco.Renderer],
                    cameras: tuple[mujoco.MjvCamera, mujoco.MjvCamera],
                    hz: float, quality: int) -> int:
+    fingers = FingerPoser(sim)
     with np.load(path / "data.npz") as source:
         required = {"t", "q", "ctrl", "ee_pos", "ee_quat", "obj_pos", "obj_quat", "gripper"}
         missing = required - set(source.files)
@@ -88,6 +156,7 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
     try:
         (temp / "shoulder").mkdir()
         (temp / "wrist").mkdir()
+        finger_opening = np.zeros(len(indices), dtype=np.float32)
         for frame_i in range(len(indices)):
             sim.data.qpos[:] = sim.model.qpos0
             sim.data.qvel[:] = 0.0
@@ -96,7 +165,7 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
             nctrl = min(sim.model.nu, arrays["ctrl"].shape[1])
             sim.data.ctrl[:nctrl] = arrays["ctrl"][frame_i, :nctrl]
             sim.set_object_poses(arrays["obj_pos"][frame_i], arrays["obj_quat"][frame_i])
-            mujoco.mj_forward(sim.model, sim.data)
+            finger_opening[frame_i] = fingers.pose(float(sim.data.ctrl[sim.grip_act]))
 
             for name, renderer, camera in zip(("shoulder", "wrist"), renderers, cameras):
                 renderer.update_scene(sim.data, camera)
@@ -115,6 +184,7 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
             ee_pos=arrays["ee_pos"].astype(np.float32),
             ee_quat=arrays["ee_quat"].astype(np.float32),
             gripper=arrays["gripper"].astype(np.float32),
+            finger_opening=finger_opening,
         )
         (temp / "source.json").write_text(json.dumps({
             "episode": path.name,
@@ -130,6 +200,15 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
         shutil.rmtree(temp, ignore_errors=True)
         raise
     return len(indices)
+
+
+def is_current_render(destination: Path) -> bool:
+    """True for a finished render that includes posed fingers."""
+    trajectory = destination / "trajectory.npz"
+    if not trajectory.is_file():
+        return False
+    with np.load(trajectory) as cached:
+        return "finger_opening" in cached.files
 
 
 def main() -> None:
@@ -158,7 +237,7 @@ def main() -> None:
     try:
         for number, episode in enumerate(episodes, 1):
             destination = args.output / episode.name
-            complete = (destination / "trajectory.npz").is_file()
+            complete = is_current_render(destination)
             if complete and not args.force:
                 with np.load(destination / "trajectory.npz") as cached:
                     count = len(cached["q"])
@@ -173,7 +252,7 @@ def main() -> None:
             renderer.close()
 
     manifest = {
-        "format": "robot-arm-learning-vla-render-v1",
+        "format": "robot-arm-learning-vla-render-v2",
         "episodes": [p.name for p in episodes],
         "num_episodes": len(episodes),
         "num_frames": total,
