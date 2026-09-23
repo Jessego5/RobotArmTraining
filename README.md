@@ -173,6 +173,19 @@ training bypass PNG decoding and the large embedded Parquet image columns.
 Training discovers the default cache automatically; pass `--no-image-cache`
 to compare against the original path.
 
+## VLA-Adapter on a Linux GPU machine
+
+`tools/train_vla_pod.py` runs the Colab notebook's pipeline without Colab:
+it creates a Python 3.10 environment, applies the notebook's VLA-Adapter
+patches, renders and converts the demonstrations, downloads the base model,
+and fine-tunes. Each stage is idempotent, so rerunning resumes setup, and
+`--resume-run-id` continues training from the last checkpoint:
+
+```bash
+python3 tools/train_vla_pod.py --steps 50       # end-to-end smoke test
+python3 tools/train_vla_pod.py --steps 20000
+```
+
 ## Model rollout
 
 `rollout.py` runs the LoRA VLA-Adapter checkpoint produced by the training
