@@ -46,6 +46,8 @@ def main() -> None:
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--val-batches", type=int, default=40)
     parser.add_argument("--log-freq", type=int, default=25)
+    parser.add_argument("--save-freq", type=int, default=5000,
+                        help="overwrite the output checkpoint every N steps (0 disables)")
     parser.add_argument("--seed", type=int, default=20260922)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=4)
@@ -149,6 +151,11 @@ def main() -> None:
         weight_decay=cfg.optimizer_weight_decay,
     )
 
+    def save_checkpoint() -> None:
+        policy.save_pretrained(args.output)
+        preprocessor.save_pretrained(args.output)
+        postprocessor.save_pretrained(args.output)
+
     policy.train()
     iterator = iter(train_loader)
     losses: list[float] = []
@@ -183,6 +190,9 @@ def main() -> None:
                 f"rate={rate:.2f}step/s {details}",
                 flush=True,
             )
+        if args.save_freq and step % args.save_freq == 0 and step < args.steps:
+            save_checkpoint()
+            print(f"saved checkpoint at step {step} to {args.output}", flush=True)
 
     # LeRobot 0.4.4's ACT VAE only constructs its posterior while the module is
     # in training mode.  Keep that mode for held-out loss computation (with
@@ -202,9 +212,7 @@ def main() -> None:
                 loss, _ = policy.forward(batch)
             val_losses.append(float(loss))
 
-    policy.save_pretrained(args.output)
-    preprocessor.save_pretrained(args.output)
-    postprocessor.save_pretrained(args.output)
+    save_checkpoint()
     elapsed = time.monotonic() - started
     report = {
         "steps": args.steps,
