@@ -106,7 +106,10 @@ def main() -> None:
         run(["uv", "venv", args.venv, "--python", "3.10"])
     run(["uv", "pip", "install", "--python", python, "-e", VLA_DIR,
          "tensorflow-metadata==1.13.1", "protobuf==4.25.9",
-         "mujoco", "opencv-python-headless", "scipy"])
+         "mujoco", "opencv-python-headless", "scipy",
+         # Cloud images often set HF_HUB_ENABLE_HF_TRANSFER=1, which makes
+         # every Hugging Face download fail unless this package is present.
+         "hf_transfer"])
     run([python, "-c", "import torch, tensorflow as tf, mujoco; "
          "assert torch.cuda.is_available(), 'torch cannot see the GPU'; "
          "print('torch', torch.__version__, 'tensorflow', tf.__version__, "
