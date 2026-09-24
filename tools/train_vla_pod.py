@@ -61,6 +61,40 @@ def notebook_cell(marker: str) -> str:
     return cells[0]
 
 
+def cgroup_cpu_limit() -> int | None:
+    """CPUs this container may use under its cgroup quota, if it has one."""
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    try:  # cgroup v1
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def limit_cpus(requested: int | None) -> None:
+    """Pin this process, and so every child, to the CPUs it can actually use.
+
+    Containers see every host core, but a quota caps how many run at once.
+    TensorFlow sizes tf.data and its thread pools from the visible cores, so
+    on a 255-core host with a ~16-CPU quota it throttles the input pipeline
+    to seconds per batch.  Both TensorFlow and PyTorch honour the affinity.
+    """
+    available = sorted(os.sched_getaffinity(0))
+    count = min(requested or cgroup_cpu_limit() or len(available), len(available))
+    if count < len(available):
+        os.sched_setaffinity(0, available[:count])
+    os.environ.setdefault("OMP_NUM_THREADS", str(count))
+    print(f"using {count} of {len(available)} visible CPUs", flush=True)
+
+
 def checkout_vla_adapter() -> None:
     # VLA-Adapter/ may already hold rendered frames from the ACT pipeline, so
     # fetch into it in place rather than cloning into a fresh directory.
@@ -83,17 +117,21 @@ def main() -> None:
     parser.add_argument("--val-freq", type=int, default=250)
     parser.add_argument("--val-time-limit", type=int, default=60)
     # 8 x 1 keeps the notebook's effective batch of 8 in a quarter of the
-    # micro-steps; an 80 GB card has room for it next to an ACT run.
+    # micro-steps.  With checkpointing it used ~20 GB of an 80 GB A100, so
+    # the ~30% slower checkpointed backward pass is off by default.
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--gradient-checkpointing",
-                        action=argparse.BooleanOptionalAction, default=True)
+                        action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--venv", type=Path, default=Path("/workspace/vla-env"))
     parser.add_argument("--output-root", type=Path, default=CODE_DIR / "outputs" / "vla")
     parser.add_argument("--resume-run-id", default="")
     parser.add_argument("--resume-learning-rate", type=float)
     parser.add_argument("--wandb-entity", default="")
+    parser.add_argument("--cpus", type=int,
+                        help="CPUs to use (default: the container's cgroup quota)")
     args = parser.parse_args()
+    limit_cpus(args.cpus)
 
     python = str(args.venv / "bin/python")
 
