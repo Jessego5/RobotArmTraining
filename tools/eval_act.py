@@ -116,7 +116,7 @@ def main() -> None:
                              "n_action_steps); first: re-plan every step; te: temporal ensemble")
     parser.add_argument("--te-coeff", type=float, default=0.01)
     parser.add_argument("--hz", type=float, default=10.0)
-    parser.add_argument("--max-joint-step", type=float, default=0.15)
+    parser.add_argument("--max-joint-step", type=float, default=0.3)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--chunk", type=int, default=5, help="episodes per worker task")
     parser.add_argument("--output", type=Path, help="write per-episode results and summary JSON")

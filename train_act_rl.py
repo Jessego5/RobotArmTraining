@@ -578,7 +578,7 @@ def main() -> None:
     parser.add_argument("--rollout-steps", type=int, default=64)
     parser.add_argument("--episode-steps", type=int, default=150)
     parser.add_argument("--hz", type=float, default=10.0)
-    parser.add_argument("--max-joint-step", type=float, default=0.15)
+    parser.add_argument("--max-joint-step", type=float, default=0.3)
     parser.add_argument("--ppo-epochs", type=int, default=6)
     parser.add_argument("--minibatch-size", type=int, default=128)
     parser.add_argument("--gamma", type=float, default=0.99)

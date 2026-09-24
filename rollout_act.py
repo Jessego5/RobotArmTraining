@@ -56,7 +56,7 @@ def main() -> None:
     )
     parser.add_argument("--hz", type=float, default=10.0)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--max-joint-step", type=float, default=0.15)
+    parser.add_argument("--max-joint-step", type=float, default=0.3)
     parser.add_argument(
         "--temporal-ensemble",
         action=argparse.BooleanOptionalAction,
