@@ -1,7 +1,8 @@
 """Convert rendered Panthera demonstrations to a local LeRobot dataset.
 
 The ACT policy observes shoulder and wrist RGB images plus the six arm joint
-positions and gripper opening.  Its action is the *next* sampled joint target
+positions and the measured finger opening (``--gripper-state command`` keeps
+the older commanded opening).  Its action is the *next* sampled joint target
 and gripper command.  The one-sample shift matters because each source row was
 recorded after applying that row's control; using the unshifted control would
 teach a nearly identity state-to-action mapping.
@@ -12,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,17 +23,21 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "sim"))
+
+from act_state import ARM_JOINT_NAMES, FINGER_OPENING, GRIPPER_COMMAND  # noqa: E402
+
 DEFAULT_INPUT = REPO_ROOT / "VLA-Adapter" / "data" / "robot_arm_learning_rendered"
 DEFAULT_OUTPUT = REPO_ROOT / "outputs" / "lerobot" / "panthera_stack"
-JOINT_NAMES = [f"joint{i}" for i in range(1, 7)] + ["gripper_open_m"]
+ACTION_NAMES = ARM_JOINT_NAMES + [GRIPPER_COMMAND]
 
 
-def features(height: int, width: int) -> dict:
+def features(height: int, width: int, state_names: list[str]) -> dict:
     return {
         "observation.state": {
             "dtype": "float32",
             "shape": (7,),
-            "names": JOINT_NAMES,
+            "names": state_names,
         },
         "observation.images.shoulder": {
             "dtype": "image",
@@ -46,7 +52,7 @@ def features(height: int, width: int) -> dict:
         "action": {
             "dtype": "float32",
             "shape": (7,),
-            "names": JOINT_NAMES,
+            "names": ACTION_NAMES,
         },
     }
 
@@ -65,7 +71,11 @@ def main() -> None:
     parser.add_argument("--repo-id", default="local/panthera_stack")
     parser.add_argument("--task", default="stack the three colored cubes")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--gripper-state", choices=("measured", "command"), default="measured",
+                        help="observe the measured finger opening or the gripper command")
     args = parser.parse_args()
+    measured = args.gripper_state == "measured"
+    state_names = ARM_JOINT_NAMES + [FINGER_OPENING if measured else GRIPPER_COMMAND]
 
     manifest = json.loads((args.input / "manifest.json").read_text())
     fps = int(round(float(manifest["sample_hz"])))
@@ -85,7 +95,7 @@ def main() -> None:
         root=args.output,
         fps=fps,
         robot_type="panthera_ht_sim",
-        features=features(height, width),
+        features=features(height, width, state_names),
         use_videos=False,
         image_writer_threads=8,
         metadata_buffer_size=20,
@@ -95,12 +105,15 @@ def main() -> None:
             with np.load(episode / "trajectory.npz") as data:
                 q = np.asarray(data["q"], dtype=np.float32)
                 ctrl = np.asarray(data["ctrl"], dtype=np.float32)
+                if measured and "finger_opening" not in data.files:
+                    raise SystemExit(f"{episode}: no finger_opening; re-render with "
+                                     "teleop/render_vla_dataset.py")
+                gripper = (np.asarray(data["finger_opening"], dtype=np.float32)
+                           if measured else ctrl[:, 6])
             if len(q) < 2 or ctrl.shape != (len(q), 7):
                 raise ValueError(f"{episode}: unexpected q/ctrl shapes {q.shape}/{ctrl.shape}")
 
-            # The current gripper command is the best available proprioceptive
-            # value; finger joint positions were not included in the recording.
-            state = np.concatenate([q, ctrl[:, 6:7]], axis=1)
+            state = np.concatenate([q, gripper[:, None]], axis=1)
             action = np.concatenate([ctrl[1:], ctrl[-1:]], axis=0)
             for frame_i in range(len(q)):
                 shoulder_path = episode / "shoulder" / f"{frame_i:05d}.jpg"

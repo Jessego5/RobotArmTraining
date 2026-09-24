@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -24,6 +25,10 @@ from tools.lerobot_image_cache import CachedLeRobotDataset, default_cache_path
 
 
 REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(REPO_ROOT / "sim"))
+
+from act_state import write_state_names  # noqa: E402
+
 DEFAULT_DATASET = REPO_ROOT / "outputs" / "lerobot" / "panthera_stack"
 DEFAULT_OUTPUT = REPO_ROOT / "outputs" / "act" / "panthera_stack"
 
@@ -48,6 +53,9 @@ def main() -> None:
     parser.add_argument("--log-freq", type=int, default=25)
     parser.add_argument("--save-freq", type=int, default=5000,
                         help="overwrite the output checkpoint every N steps (0 disables)")
+    parser.add_argument("--keep-every", type=int, default=0,
+                        help="also keep a separate checkpoint_NNNNNN every N steps, "
+                             "to pick the best step count by rollout (0 disables)")
     parser.add_argument("--seed", type=int, default=20260922)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--prefetch-factor", type=int, default=4)
@@ -151,10 +159,13 @@ def main() -> None:
         weight_decay=cfg.optimizer_weight_decay,
     )
 
-    def save_checkpoint() -> None:
-        policy.save_pretrained(args.output)
-        preprocessor.save_pretrained(args.output)
-        postprocessor.save_pretrained(args.output)
+    state_names = metadata.features["observation.state"]["names"]
+
+    def save_checkpoint(destination: Path = args.output) -> None:
+        policy.save_pretrained(destination)
+        preprocessor.save_pretrained(destination)
+        postprocessor.save_pretrained(destination)
+        write_state_names(destination, state_names)
 
     policy.train()
     iterator = iter(train_loader)
@@ -193,6 +204,10 @@ def main() -> None:
         if args.save_freq and step % args.save_freq == 0 and step < args.steps:
             save_checkpoint()
             print(f"saved checkpoint at step {step} to {args.output}", flush=True)
+        if args.keep_every and step % args.keep_every == 0:
+            kept = args.output / f"checkpoint_{step:06d}"
+            save_checkpoint(kept)
+            print(f"kept checkpoint {kept}", flush=True)
 
     # LeRobot 0.4.4's ACT VAE only constructs its posterior while the module is
     # in training mode.  Keep that mode for held-out loss computation (with

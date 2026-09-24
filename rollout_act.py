@@ -96,6 +96,7 @@ def main() -> None:
 
     sys.path.insert(0, str(REPO_ROOT / "sim"))
     sys.path.insert(0, str(REPO_ROOT / "teleop"))
+    from act_state import gripper_state_name, robot_state
     from keyboard import DEFAULT_ARM_START_RANGE, randomize_arm_start
     from panthera_env import PantheraSim
     from render_vla_dataset import shoulder_camera, wrist_camera
@@ -124,6 +125,7 @@ def main() -> None:
         policy.config, pretrained_path=str(checkpoint)
     )
     metadata = LeRobotDatasetMetadata("local/panthera_stack", root=args.dataset)
+    gripper_state = gripper_state_name(checkpoint)
 
     sim = PantheraSim()
 
@@ -174,9 +176,7 @@ def main() -> None:
             for renderer, camera in zip(renderers, cameras):
                 renderer.update_scene(sim.data, camera)
                 images.append(renderer.render().copy())
-            state = np.concatenate(
-                [sim.q, [float(sim.data.ctrl[sim.grip_act])]]
-            ).astype(np.float32)
+            state = robot_state(sim, gripper_state)
             observation = prepare_observation_for_inference(
                 {
                     "observation.state": state,

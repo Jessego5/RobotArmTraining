@@ -89,6 +89,8 @@ class PantheraSim:
             for j in ARM_JOINTS])
         self.grip_act = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "gripper")
+        self.finger_qadr = self.model.jnt_qposadr[
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "L_finger_joint")]
 
         # Free bodies in the scene -- the cubes on the table. Found by joint
         # type rather than by name so any scene works, and kept in model order
@@ -196,6 +198,11 @@ class PantheraSim:
     @property
     def q(self) -> np.ndarray:
         return self.data.qpos[self.arm_qadr].copy()
+
+    @property
+    def finger_opening(self) -> float:
+        """Measured opening of each finger in metres, 0 to GRIPPER_OPEN."""
+        return float(self.data.qpos[self.finger_qadr])
 
     @property
     def dq(self) -> np.ndarray:

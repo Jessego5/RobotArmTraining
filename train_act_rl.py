@@ -61,7 +61,8 @@ class EpisodeStats:
 class PantheraStackEnv:
     """Small, purpose-built environment around the existing PantheraSim."""
 
-    def __init__(self, seed: int, episode_steps: int, hz: float, max_joint_step: float):
+    def __init__(self, seed: int, episode_steps: int, hz: float, max_joint_step: float,
+                 gripper_state: str = "gripper_open_m"):
         import mujoco
 
         sys.path.insert(0, str(REPO_ROOT / "sim"))
@@ -69,9 +70,12 @@ class PantheraStackEnv:
         from keyboard import DEFAULT_ARM_START_RANGE, randomize_arm_start
         from panthera_env import GRIPPER_OPEN, PantheraSim
         from render_vla_dataset import shoulder_camera, wrist_camera
+        from act_state import robot_state
         from stack_task import StackReward
 
         self.randomize_arm_start = randomize_arm_start
+        self.robot_state = robot_state
+        self.gripper_state = gripper_state
         self.arm_start_range = DEFAULT_ARM_START_RANGE
         self.gripper_open = GRIPPER_OPEN
         self.sim = PantheraSim()
@@ -111,10 +115,7 @@ class PantheraStackEnv:
         for renderer, camera in zip(self.renderers, self.cameras):
             renderer.update_scene(self.sim.data, camera)
             images.append(renderer.render().copy())
-        state = np.concatenate(
-            [self.sim.q, [float(self.sim.data.ctrl[self.sim.grip_act])]]
-        ).astype(np.float32)
-        return state, images[0], images[1]
+        return self.robot_state(self.sim, self.gripper_state), images[0], images[1]
 
     def critic_state(self) -> np.ndarray:
         positions, _ = self.sim.object_poses()
@@ -207,6 +208,7 @@ def _env_worker_main(connection, spec: dict, indices: list[int], seeds: list[int
                 config["episode_steps"],
                 config["hz"],
                 config["max_joint_step"],
+                config["gripper_state"],
             )
             for seed in seeds
         ]
@@ -262,9 +264,11 @@ def _env_worker_main(connection, spec: dict, indices: list[int], seeds: list[int
 class LocalEnvBatch:
     """Single-process implementation used by ``--env-workers 1``."""
 
-    def __init__(self, seeds: list[int], episode_steps: int, hz: float, max_joint_step: float):
+    def __init__(self, seeds: list[int], episode_steps: int, hz: float, max_joint_step: float,
+                 gripper_state: str):
         self.envs = [
-            PantheraStackEnv(seed, episode_steps, hz, max_joint_step) for seed in seeds
+            PantheraStackEnv(seed, episode_steps, hz, max_joint_step, gripper_state)
+            for seed in seeds
         ]
         self._critic = np.stack([env.critic_state() for env in self.envs])
 
@@ -321,6 +325,7 @@ class ParallelEnvBatch:
         episode_steps: int,
         hz: float,
         max_joint_step: float,
+        gripper_state: str,
     ):
         self.num_envs = len(seeds)
         self.handles: dict[str, shared_memory.SharedMemory] = {}
@@ -349,6 +354,7 @@ class ParallelEnvBatch:
                 "episode_steps": episode_steps,
                 "hz": hz,
                 "max_joint_step": max_joint_step,
+                "gripper_state": gripper_state,
             }
             for indices in groups:
                 parent, child = context.Pipe()
@@ -524,6 +530,9 @@ def save_checkpoint(
     policy.save_pretrained(temp)
     preprocessor.save_pretrained(temp)
     postprocessor.save_pretrained(temp)
+    from act_state import ARM_JOINT_NAMES, write_state_names
+
+    write_state_names(temp, ARM_JOINT_NAMES + [args.gripper_state])
     import torch
 
     torch.save(
@@ -637,6 +646,12 @@ def main() -> None:
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=True)
 
+    sys.path.insert(0, str(REPO_ROOT / "sim"))
+    from act_state import gripper_state_name
+
+    gripper_state = gripper_state_name(source)
+    # Recorded in rl_config.json and in every saved checkpoint.
+    args.gripper_state = gripper_state
     config = PreTrainedConfig.from_pretrained(source)
     config.device = str(device)
     config.use_amp = device.type == "cuda"
@@ -697,7 +712,7 @@ def main() -> None:
     env_seeds = [args.seed + 1009 * i + 104729 * start_update for i in range(args.num_envs)]
     if env_workers == 1:
         env_batch = LocalEnvBatch(
-            env_seeds, args.episode_steps, args.hz, args.max_joint_step
+            env_seeds, args.episode_steps, args.hz, args.max_joint_step, gripper_state
         )
     else:
         env_batch = ParallelEnvBatch(
@@ -706,6 +721,7 @@ def main() -> None:
             args.episode_steps,
             args.hz,
             args.max_joint_step,
+            gripper_state,
         )
     recent_episodes: deque[EpisodeStats] = deque(maxlen=100)
     metrics_path = args.output / "metrics.jsonl"

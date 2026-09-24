@@ -142,12 +142,19 @@ def main() -> None:
     run(["uv", "python", "install", "3.10"])
     if not args.venv.exists():
         run(["uv", "venv", args.venv, "--python", "3.10"])
-    run(["uv", "pip", "install", "--python", python, "-e", VLA_DIR,
-         "tensorflow-metadata==1.13.1", "protobuf==4.25.9",
-         "mujoco", "opencv-python-headless", "scipy",
-         # Cloud images often set HF_HUB_ENABLE_HF_TRANSFER=1, which makes
-         # every Hugging Face download fail unless this package is present.
-         "hf_transfer"])
+    install = ["-e", str(VLA_DIR),
+               "tensorflow-metadata==1.13.1", "protobuf==4.25.9",
+               "mujoco", "opencv-python-headless", "scipy",
+               # Cloud images often set HF_HUB_ENABLE_HF_TRANSFER=1, which makes
+               # every Hugging Face download fail unless this package is present.
+               "hf_transfer"]
+    # Rebuilding the editable VLA-Adapter package takes ~10 minutes on a
+    # network volume; skip it when this exact install already succeeded.
+    stamp = args.venv / ".robotarm-install.json"
+    wanted = json.dumps({"commit": VLA_COMMIT, "install": install})
+    if not stamp.is_file() or stamp.read_text() != wanted:
+        run(["uv", "pip", "install", "--python", python, *install])
+        stamp.write_text(wanted)
     run([python, "-c", "import torch, tensorflow as tf, mujoco; "
          "assert torch.cuda.is_available(), 'torch cannot see the GPU'; "
          "print('torch', torch.__version__, 'tensorflow', tf.__version__, "

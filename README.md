@@ -113,6 +113,20 @@ cube layout and arm start, or `q` to close the rollout:
 python rollout_act.py --checkpoint outputs/act/panthera_stack_full
 ```
 
+The observed gripper value is the measured finger opening, so the policy can
+tell a closed grasp from fingers closed on nothing. Each checkpoint records its
+state in `policy_state.json`; checkpoints without it receive the older gripper
+command. `--keep-every N` keeps a separate checkpoint every N steps, and
+`tools/eval_act.py` scores checkpoints on the same seeded layouts:
+
+```bash
+.venv-act/bin/python train_act.py --steps 60000 --keep-every 10000 --output outputs/act/sweep
+.venv-act/bin/python tools/eval_act.py outputs/act/sweep/checkpoint_* --episodes 30
+```
+
+On a prepared GPU pod, `bash tools/pod_act_sweep.sh` rebuilds the dataset and
+runs both steps.
+
 Temporal ensembling is enabled by default to smooth transitions between ACT
 action chunks. Pass `--no-temporal-ensemble` to compare against the checkpoint's
 original 10-step open-loop action queue.
