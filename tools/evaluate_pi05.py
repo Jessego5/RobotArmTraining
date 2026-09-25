@@ -195,6 +195,18 @@ def summarize(records):
             "error_episodes": sum(r["error"] is not None for r in records)}
 
 
+def wandb_metrics(report):
+    metrics = {}
+    for distribution, result in report["by_distribution"].items():
+        for key in ("episodes", "successes", "success_rate", "error_episodes"):
+            metrics[f"{distribution}/{key}"] = result[key]
+        lo, hi = result["success_95pct_wilson_interval"]
+        metrics[f"{distribution}/success_ci_low"] = lo
+        metrics[f"{distribution}/success_ci_high"] = hi
+        metrics.update({f"{distribution}/{key}_rate": value for key, value in result["rates"].items()})
+    return metrics
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -206,6 +218,11 @@ def main():
     parser.add_argument("--video-episodes", type=int, default=6, help="Number per distribution; -1 saves every rollout")
     parser.add_argument("--save-traces", action="store_true")
     parser.add_argument("--action-steps", type=int, default=10)
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb-project", default="panthera-pi05-ik3")
+    parser.add_argument("--wandb-entity", default=None)
+    parser.add_argument("--wandb-mode", choices=["online", "offline"], default="online")
+    parser.add_argument("--wandb-log-videos", action="store_true")
     args = parser.parse_args()
     if args.episodes < 1 or args.seconds < 1 or args.video_episodes < -1:
         parser.error("Episodes must be positive, seconds >= 1, video episodes >= -1")
@@ -261,7 +278,17 @@ def main():
                 "max_horizontal_error_m": .012, "headless_simulation": True,
                 "grasp_assist": "unchanged contact-triggered compliant-pad welds from training scene",
                 "matched_starts": "collector start region, fresh seeds, no planner-success filtering"}
+    wandb_run = None
     try:
+        if args.wandb:
+            import wandb
+            training_config = json.loads((checkpoint / "train_config.json").read_text())
+            training_run_id = training_config.get("wandb", {}).get("run_id")
+            wandb_run = wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                mode=args.wandb_mode, name=args.output.name, job_type="evaluation",
+                group=training_run_id or training_config.get("job_name"), dir=str(args.output),
+                config={**settings, "training_run_id": training_run_id}, save_code=False)
+            print("W&B evaluation run:", wandb_run.url, flush=True)
         for distribution in distributions:
             for i in range(args.episodes):
                 seed = args.seed + i
@@ -279,7 +306,17 @@ def main():
                 (args.output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
                 print(json.dumps({"episode": i+1, "distribution": distribution, **record}), flush=True)
                 print(json.dumps(report["by_distribution"]), flush=True)
+                if wandb_run is not None:
+                    metrics = wandb_metrics(report)
+                    wandb_run.summary.update(metrics)
+                    if args.wandb_log_videos and record["video"]:
+                        video = Path(record["video"])
+                        if video.is_file() and video.stat().st_size > 1024:
+                            metrics[f"videos/{distribution}/seed_{seed}"] = wandb.Video(str(video), format="mp4")
+                    wandb_run.log(metrics, step=len(records))
     finally:
+        if wandb_run is not None:
+            wandb_run.finish()
         for renderer in renderers:
             renderer.close()
 

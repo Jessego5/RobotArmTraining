@@ -25,8 +25,10 @@ def main():
     # Full-model π₀.₅: Panthera IK three-block stacking
 
     Target: **one NVIDIA RTX PRO 6000, 96 GB VRAM**, Linux, 64 GB+ system RAM
-    (128 GB recommended), and **300 GiB free persistent storage** for data, caches,
-    smoke run, and full optimizer checkpoints. Use a current Blackwell-compatible
+    (128 GB recommended). Storage depends on checkpoints and caches; budget roughly
+    **100–150 GiB total**, not 300 GiB free at startup. The notebook prints free space,
+    retains the latest two full checkpoints, and measures actual checkpoint sizes.
+    The smoke run saves no model/optimizer copy. Use a current Blackwell-compatible
     NVIDIA driver; the pinned LeRobot environment uses CUDA 12.8 PyTorch wheels.
     A 48 GB RTX 6000 Ada is a different GPU. The VRAM preflight catches this.
 
@@ -70,13 +72,20 @@ def main():
     ACTION_STEPS = 10                # Replan every 0.33 s during rollout.
     NUM_WORKERS = 8
     SEED = 20260925
-    MIN_FREE_GIB = 300
+    KEEP_CHECKPOINTS = 2             # Latest two complete checkpoints in THIS run.
+                                    # Set 1 for less disk use; saves replacement before pruning.
+    STORAGE_WARNING_GIB = 120        # Advisory only; does not block setup.
     RESUME_CHECKPOINT = ""          # .../checkpoints/last/pretrained_model
     CHECKPOINT_OVERRIDE = ""        # Evaluate a different saved pretrained_model directory.
     EVAL_EPISODES = 50               # Per distribution; total 100 for both.
     EVAL_SECONDS = 60                # Demos last up to 41 s; allow recovery time.
     EVAL_SEED = 260925000            # Fresh fixed seeds, disjoint from collection.
     VIDEO_EPISODES = 6               # Per distribution; -1 records every rollout.
+    WANDB_ENABLE = True
+    WANDB_PROJECT = "panthera-pi05-ik3"
+    WANDB_ENTITY = ""                # Optional user/team; empty uses your default.
+    WANDB_MODE = "online"            # "offline" keeps logs locally for later sync.
+    WANDB_LOG_VIDEOS = True          # Upload saved rollout videos; never model weights.
     ''')
     md('''
     ## 1. Install an isolated, pinned environment
@@ -88,8 +97,14 @@ def main():
     code('''
     import os, sys, subprocess, shutil, json, time
     WORK_DIR.mkdir(parents=True, exist_ok=True)
-    if shutil.disk_usage(WORK_DIR).free / 2**30 < MIN_FREE_GIB:
-        raise RuntimeError(f"Need {MIN_FREE_GIB} GiB free on {WORK_DIR}. Change WORK_DIR to a larger persistent disk.")
+    free_gib = shutil.disk_usage(WORK_DIR).free / 2**30
+    print(f"Free storage on {WORK_DIR}: {free_gib:.1f} GiB")
+    if free_gib < STORAGE_WARNING_GIB:
+        print("Storage advisory: data is ~22 GiB, plus base weights, environment/caches, and checkpoints. "
+              "Reusing existing downloads needs less additional space. "
+              "KEEP_CHECKPOINTS=1 reduces retention; space is checked against actual tensors before each save.")
+    if KEEP_CHECKPOINTS < 1:
+        raise ValueError("KEEP_CHECKPOINTS must be at least 1")
     if not shutil.which("nvidia-smi"):
         raise RuntimeError("No NVIDIA driver found; run this on the RTX PRO 6000 server.")
 
@@ -128,12 +143,12 @@ def main():
     run(["git", "checkout", "--detach", LEROBOT_COMMIT], cwd=LEROBOT_DIR)
     CHILD_ENV = dict(os.environ, UV_CACHE_DIR=str(WORK_DIR / "uv-cache"),
                      TMPDIR=str(WORK_DIR / "tmp"), TOKENIZERS_PARALLELISM="false", MUJOCO_GL="egl",
-                     CUDA_VISIBLE_DEVICES="0")
+                     CUDA_VISIBLE_DEVICES="0", PI05_KEEP_CHECKPOINTS=str(KEEP_CHECKPOINTS))
     Path(CHILD_ENV["TMPDIR"]).mkdir(exist_ok=True)
     run(UV + ["sync", "--frozen", "--extra", "pi", "--extra", "training", "--python", "3.12"],
         cwd=LEROBOT_DIR, env=CHILD_ENV)
     PYTHON = LEROBOT_DIR / ".venv/bin/python"
-    run(UV + ["pip", "install", "--python", PYTHON, "mujoco==3.13.0", "imageio==2.37.3", "imageio-ffmpeg==0.6.0"],
+    run(UV + ["pip", "install", "--python", PYTHON, "mujoco==3.13.0", "imageio==2.37.4", "imageio-ffmpeg==0.6.0"],
         env=CHILD_ENV)
     def python(source, *, log=None):
         run([PYTHON, "-u", "-c", source], env=CHILD_ENV, log=log)
@@ -156,6 +171,15 @@ def main():
     code('''
     from huggingface_hub import HfApi, get_token
     from getpass import getpass
+    if WANDB_MODE not in ("online", "offline"):
+        raise ValueError("WANDB_MODE must be online or offline")
+    if WANDB_ENABLE and WANDB_MODE == "online":
+        # The child process sees the key through its environment, not CLI/logs.
+        wandb_key = os.environ.get("WANDB_API_KEY") or getpass("W&B API key (wandb.ai/authorize): ")
+        if not wandb_key:
+            raise RuntimeError("Provide a W&B API key, or select WANDB_MODE='offline'.")
+        CHILD_ENV["WANDB_API_KEY"] = wandb_key
+        del wandb_key
     token = os.environ.get("HF_TOKEN") or get_token() or getpass("Hugging Face read token: ")
     if not token:
         raise RuntimeError("A token with PaliGemma tokenizer access is required.")
@@ -254,7 +278,7 @@ def main():
     Unused language-generation heads can have no gradient because this is an action
     loss; no layer is intentionally frozen. Weight-loading failures are fatal.
 
-    The smoke run also saves a complete checkpoint and runs held-out loss. Inspect
+    The smoke run runs held-out loss and saves only small diagnostic files. Inspect
     its peak VRAM before continuing. If it runs out of memory, reduce **BATCH_SIZE**
     and rerun with a fresh smoke directory; it never switches to LoRA or freezes
     the vision encoder. Batch size 16 is an optional later throughput experiment.
@@ -265,6 +289,12 @@ def main():
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     LOG_DIR = WORK_DIR / "logs"
     LOG_DIR.mkdir(exist_ok=True)
+    def wandb_flags():
+        flags = [f"--wandb.enable={str(WANDB_ENABLE).lower()}", f"--wandb.project={WANDB_PROJECT}",
+                 f"--wandb.mode={WANDB_MODE}", "--wandb.disable_artifact=true"]
+        if WANDB_ENTITY:
+            flags.append(f"--wandb.entity={WANDB_ENTITY}")
+        return flags
     def train_command(output, steps, save_freq, eval_freq):
         return [PYTHON, "-u", TRAINER,
             f"--dataset.repo_id={DATASET_REPO}", f"--dataset.root={DATA_ROOT}",
@@ -285,10 +315,12 @@ def main():
             f"--num_workers={NUM_WORKERS}", "--prefetch_factor=2",
             f"--steps={steps}", f"--save_freq={save_freq}", f"--eval_steps={eval_freq}",
             "--max_eval_samples=128", "--env_eval_freq=0", "--log_freq=20",
-            f"--seed={SEED}", "--wandb.enable=false"]
+            f"--seed={SEED}"] + wandb_flags()
     SMOKE_OUTPUT = WORK_DIR / "runs" / (RUN_NAME + "_smoke_" + time.strftime("%Y%m%d_%H%M%S"))
     if not RESUME_CHECKPOINT:
-        run(train_command(SMOKE_OUTPUT, 4, 4, 4), env=CHILD_ENV, log=LOG_DIR / "smoke.log")
+        smoke_command = [a for a in train_command(SMOKE_OUTPUT, 4, 4, 4) if not str(a).startswith("--wandb.")]
+        run(smoke_command + ["--save_checkpoint=false", "--wandb.enable=false"],
+            env=CHILD_ENV, log=LOG_DIR / "smoke.log")
         print((SMOKE_OUTPUT / "full_model_audit.json").read_text())
         print((SMOKE_OUTPUT / "peak_memory.json").read_text())
     else:
@@ -304,9 +336,18 @@ def main():
     configuration cell, and this cell. The checkpoint's training configuration is
     authoritative; `TRAIN_STEPS` is the desired **total**, not extra steps.
 
-    Use persistent storage. Periodic full optimizer checkpoints are large; no
-    automatic deletion of past experiments is performed. Training and rollouts
-    run sequentially to avoid competing for VRAM.
+    Use persistent storage. By default only the latest two completed checkpoints
+    from this run are retained. A replacement is fully saved before an older one
+    is removed, so temporary space for a third is needed (or two if retention is 1).
+    Past experiments and checkpoints predating this retention mechanism are not
+    deleted. `storage.json` reports actual checkpoint size and remaining free disk.
+    Training and rollouts run sequentially to avoid competing for VRAM.
+
+    W&B is enabled by default: training/validation loss, learning rate, gradient
+    norm, timing, and system metrics go to `WANDB_PROJECT`. Its run URL appears in
+    the training log. Resume uses the saved W&B run ID. Model artifacts are disabled
+    to avoid uploading multi-GB checkpoints. Offline mode can be synced later with
+    `wandb sync <offline-run-directory>` from the isolated environment.
     ''')
     code('''
     if RESUME_CHECKPOINT:
@@ -315,7 +356,12 @@ def main():
         resume_cfg = json.loads((resume / "train_config.json").read_text())
         OUTPUT = Path(resume_cfg["output_dir"])
         command = [PYTHON, "-u", TRAINER, f"--config_path={resume / 'train_config.json'}",
-                   "--resume=true", f"--steps={TRAIN_STEPS}", f"--dataset.root={DATA_ROOT}"]
+                   "--resume=true", f"--steps={TRAIN_STEPS}", f"--dataset.root={DATA_ROOT}"] + wandb_flags()
+        if WANDB_ENABLE and not resume_cfg.get("wandb", {}).get("run_id"):
+            # A checkpoint trained without W&B needs a new logging run, even
+            # though model/optimizer training resumes normally.
+            import uuid
+            command += [f"--wandb.run_id={uuid.uuid4().hex[:8]}", "--wandb.resume=allow"]
     else:
         command = train_command(OUTPUT, TRAIN_STEPS, SAVE_FREQ, EVAL_LOSS_FREQ)
     run(command, env=CHILD_ENV, log=LOG_DIR / (RUN_NAME + ".log"))
@@ -343,10 +389,17 @@ def main():
     assert (CHECKPOINT / "deployment.json").is_file(), CHECKPOINT
     EVALUATOR = RUNTIME / "tools/evaluate_pi05.py"
     def evaluate(output, episodes, distribution, video_episodes):
+        wandb_args = []
+        if WANDB_ENABLE:
+            wandb_args = ["--wandb", "--wandb-project", WANDB_PROJECT, "--wandb-mode", WANDB_MODE]
+            if WANDB_ENTITY:
+                wandb_args += ["--wandb-entity", WANDB_ENTITY]
+            if WANDB_LOG_VIDEOS:
+                wandb_args += ["--wandb-log-videos"]
         run([PYTHON, "-u", EVALUATOR, "--checkpoint", CHECKPOINT, "--output", output,
              "--episodes", episodes, "--seconds", EVAL_SECONDS, "--seed", EVAL_SEED,
              "--distribution", distribution, "--video-episodes", video_episodes,
-             "--action-steps", ACTION_STEPS], env=CHILD_ENV, log=LOG_DIR / "rollouts.log")
+             "--action-steps", ACTION_STEPS] + wandb_args, env=CHILD_ENV, log=LOG_DIR / "rollouts.log")
         return json.loads((output / "summary.json").read_text())
     PREVIEW_DIR = WORK_DIR / "evaluations" / (RUN_NAME + "_preview_" + time.strftime("%Y%m%d_%H%M%S"))
     preview = evaluate(PREVIEW_DIR, 3, "matched", -1)
@@ -372,6 +425,9 @@ def main():
     interval, all per-seed outcomes, grasp/lift/two-stack rates, and timing. Re-run
     this section with `CHECKPOINT_OVERRIDE` to compare checkpoints. Checkpoint
     paths, action execution horizon and metric settings are saved with results.
+    With W&B enabled, each preview/benchmark gets an evaluation run grouped by the
+    training run ID, with success rates, confidence intervals, intermediate metrics,
+    and saved videos. Set `WANDB_LOG_VIDEOS=False` for metrics-only logging.
     ''')
     code('''
     BENCHMARK_DIR = WORK_DIR / "evaluations" / (RUN_NAME + "_benchmark_" + time.strftime("%Y%m%d_%H%M%S"))

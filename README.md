@@ -501,3 +501,39 @@ teleop/   keyboard.py  episode.py  replay.py  grid_replay.py
           render_vla_dataset.py
 data/     episode_NNN/{data.npz, meta.json, sim.mp4}
 ```
+
+## Full-model pi0.5 on the IK three-block task
+
+Open [`notebooks/pi05_ik_three_block_full_finetune.ipynb`](notebooks/pi05_ik_three_block_full_finetune.ipynb)
+on the **RTX PRO 6000 with 96 GB VRAM**. It downloads the published
+[1,000-demo IK dataset](https://huggingface.co/datasets/FoxNerdSaysMoo/panthera-ik-three-block-stack-30hz)
+and matching simulator runtime; a local project checkout is not required.
+Budget roughly 100–150 GiB total storage, depending on caches and checkpoint
+retention. Setup reports free space without a fixed 300 GiB blocker. The smoke
+run saves no model copy; training retains the latest two completed checkpoints
+(configurable to one) and reports their actual sizes.
+
+The notebook trains the vision encoder, language backbone, action expert, and
+projections with no LoRA or frozen parameters. It uses both shoulder/wrist cameras,
+30 Hz absolute joint/gripper actions, training-only quantile statistics, an
+episode-level validation split, and strict pretrained-weight loading. Defaults
+are batch size 8, bfloat16, gradient checkpointing, and 30,000 updates. A four-update
+smoke run verifies gradient flow and reports peak VRAM before the long run.
+
+The rollout sections show browser-playable two-camera videos and measure success
+over fixed fresh seeds, separately for scripted-region and broader teleop starts.
+Success requires the released green–red–blue stack to remain aligned for one
+second. Reports include per-seed results, grasp/lift/two-stack rates, errors, and
+95% success-rate confidence intervals. Full checkpoints can be resumed or selected
+for evaluation using the notebook settings.
+
+W&B is enabled by default for training and held-out loss. Evaluation logs success
+rates, confidence intervals, and saved rollout videos in runs grouped by the
+training run ID. API keys are entered securely; model checkpoint uploads are
+disabled. Select offline mode or turn off video uploads in the settings if desired.
+
+Supporting tools: `tools/train_pi05_full.py`, `tools/evaluate_pi05.py`,
+`tools/publish_pi05_dataset.py`, `tools/bundle_pi05_runtime.py`, and
+`tools/build_pi05_notebook.py`. The notebook pins the runtime bundle and data to
+an immutable Hugging Face revision. See `reports/PI05_FULL_FINETUNE_20260925.md`
+for validation and the distinction between local smoke checks and full GPU training.

@@ -8,7 +8,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from tools.evaluate_pi05 import StackScore, summarize, wilson_interval
+from tools.evaluate_pi05 import StackScore, summarize, wilson_interval, wandb_metrics
+from tools.train_pi05_full import prune_checkpoints, tensor_bytes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,6 +42,42 @@ def test_failure_denominator_and_confidence_interval():
     assert result["success_rate"] == .5 and result["error_episodes"] == 1
     assert result["success_95pct_wilson_interval"][0] < .5 < result["success_95pct_wilson_interval"][1]
     assert wilson_interval(0, 50)[1] > 0 and wilson_interval(50, 50)[0] < 1
+    metrics = wandb_metrics({"by_distribution": {"matched": result}})
+    assert metrics["matched/success_rate"] == .5
+    assert metrics["matched/error_episodes"] == 1
+    assert metrics["matched/success_ci_low"] < .5 < metrics["matched/success_ci_high"]
+
+
+def test_checkpoint_retention_preserves_latest_incomplete_and_unrelated(tmp_path):
+    parent = tmp_path / "checkpoints"
+    parent.mkdir()
+    for name in ("000004", "005000", "010000"):
+        path = parent / name
+        path.mkdir()
+        (path / "PI05_COMPLETE").write_text("complete")
+    incomplete = parent / "015000"
+    incomplete.mkdir()
+    unrelated = parent / "best"
+    unrelated.mkdir()
+    last = parent / "last"
+    last.symlink_to("010000")
+    (parent / "external").symlink_to(unrelated, target_is_directory=True)
+    assert prune_checkpoints(parent / "010000", 2) == ["000004"]
+    assert (parent / "005000").exists() and last.resolve() == parent / "010000"
+    assert prune_checkpoints(parent / "010000", 1) == ["005000"]
+    assert incomplete.exists() and unrelated.exists() and (parent / "external").is_symlink()
+    with pytest.raises(ValueError, match="complete"):
+        prune_checkpoints(incomplete, 1)
+    assert last.exists()
+    with pytest.raises(ValueError, match="at least 1"):
+        prune_checkpoints(parent / "010000", 0)
+
+
+def test_checkpoint_size_estimator_handles_optimizer_state():
+    torch = pytest.importorskip("torch")
+    state = {"state": {0: {"exp_avg": torch.zeros(5), "exp_avg_sq": torch.zeros(5)}},
+             "param_groups": [{"params": [0], "lr": .001}]}
+    assert tensor_bytes(state) == 40
 
 
 def test_notebook_python_and_no_saved_secrets_or_results():

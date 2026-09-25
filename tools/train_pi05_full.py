@@ -9,9 +9,42 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 
 LEROBOT_COMMIT = "e624f3f7f8411ec3a02635d06e79373341e5ef35"
 CAMERAS = ["observation.images.shoulder", "observation.images.wrist"]
+
+
+def prune_checkpoints(checkpoint, keep):
+    """Prune only completed checkpoints created by this wrapper, within this run."""
+    if keep < 1:
+        raise ValueError("PI05_KEEP_CHECKPOINTS must be at least 1")
+    checkpoint = Path(checkpoint)
+    if not (checkpoint / "PI05_COMPLETE").is_file():
+        raise ValueError("Cannot prune before the new checkpoint is complete")
+    parent = checkpoint.parent
+    complete = sorted((p for p in parent.iterdir() if p.is_dir() and not p.is_symlink()
+                       and p.name.isdecimal() and (p / "PI05_COMPLETE").is_file()),
+                      key=lambda p: int(p.name))
+    last = (parent / "last").resolve()
+    removed = []
+    for old in complete[:-keep]:
+        if old.resolve() in (checkpoint.resolve(), last):
+            continue
+        shutil.rmtree(old)
+        removed.append(old.name)
+    return removed
+
+
+def tensor_bytes(value):
+    """Conservative uncompressed checkpoint-size estimate (counts aliases twice)."""
+    if hasattr(value, "numel") and hasattr(value, "element_size"):
+        return value.numel() * value.element_size()
+    if isinstance(value, dict):
+        return sum(tensor_bytes(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return sum(tensor_bytes(v) for v in value)
+    return 0
 
 
 def strict_from_pretrained(cls, pretrained_name_or_path, *, config=None, **kwargs):
@@ -76,6 +109,16 @@ def install_guards():
     original_processors = trainer.make_pre_post_processors
     original_save = trainer.save_checkpoint
     run_state = {}
+    keep_checkpoints = int(os.environ.get("PI05_KEEP_CHECKPOINTS", "2"))
+    if keep_checkpoints < 1:
+        raise ValueError("PI05_KEEP_CHECKPOINTS must be at least 1")
+
+    def report_memory():
+        if torch.cuda.is_available():
+            memory = {"peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
+                      "peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30}
+            (run_state["output"] / "peak_memory.json").write_text(json.dumps(memory, indent=2))
+            print("GPU peak memory:", memory, flush=True)
 
     def datasets(cfg):
         if cfg.peft is not None or cfg.policy.type != "pi05":
@@ -159,21 +202,45 @@ def install_guards():
             print("Full-model backward check passed:", gradients, flush=True)
             handle.remove()
         handle = opt.register_step_pre_hook(audit_gradients)
+        # Also report memory for the smoke run, which deliberately saves no weights.
+        updates = 0
+        def memory_after_step(optimizer, args, kwargs):
+            nonlocal updates
+            updates += 1
+            if updates <= 4:
+                report_memory()
+        opt.register_step_post_hook(memory_after_step)
         return opt, schedule
 
     def save_checkpoint(*args, **kwargs):
-        original_save(*args, **kwargs)
         checkpoint = Path(kwargs["checkpoint_dir"])
+        policy = kwargs["policy"]
+        accelerator = kwargs.get("accelerator")
+        if accelerator is not None:
+            policy = accelerator.unwrap_model(policy)
+        estimate = tensor_bytes(policy.state_dict()) + tensor_bytes(kwargs["optimizer"].state_dict())
+        required = int(estimate * 1.1) + 2 * 2**30
+        available = shutil.disk_usage(run_state["output"]).free
+        if available < required:
+            raise RuntimeError(f"Checkpoint needs approximately {required/2**30:.1f} GiB free; "
+                               f"{available/2**30:.1f} GiB available. Existing checkpoints are preserved.")
+        original_save(*args, **kwargs)
         (checkpoint / "pretrained_model/deployment.json").write_text(json.dumps({
             "fps": 30, "action_representation": "absolute", "action_alignment": "next_uniform_sample",
             "state_gripper": "command", "cameras": CAMERAS, "task": "stack the three colored cubes",
             "success_hold_seconds": 1.0, "dataset_repo": run_state["cfg"].dataset.repo_id,
             "dataset_revision": run_state["cfg"].dataset.revision, "lerobot_commit": LEROBOT_COMMIT}, indent=2))
-        if torch.cuda.is_available():
-            memory = {"peak_allocated_gib": torch.cuda.max_memory_allocated() / 2**30,
-                      "peak_reserved_gib": torch.cuda.max_memory_reserved() / 2**30}
-            (run_state["output"] / "peak_memory.json").write_text(json.dumps(memory, indent=2))
-            print("GPU peak memory:", memory, flush=True)
+        (checkpoint / "PI05_COMPLETE").write_text("Model, processors, optimizer and deployment contract saved.\n")
+        # Point last at the successful replacement before removing old snapshots.
+        trainer.update_last_checkpoint(checkpoint)
+        removed = prune_checkpoints(checkpoint, keep_checkpoints)
+        saved_bytes = sum(p.stat().st_size for p in checkpoint.rglob("*") if p.is_file())
+        storage = {"last_checkpoint_gib": saved_bytes / 2**30, "keep_checkpoints": keep_checkpoints,
+                   "free_gib": shutil.disk_usage(run_state["output"]).free / 2**30,
+                   "removed_checkpoint_steps": removed}
+        (run_state["output"] / "storage.json").write_text(json.dumps(storage, indent=2))
+        print("Checkpoint storage:", storage, flush=True)
+        report_memory()
     trainer.make_train_eval_datasets = datasets
     trainer.make_pre_post_processors = processors
     trainer.make_optimizer_and_scheduler = optimizer
