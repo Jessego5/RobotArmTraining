@@ -3,9 +3,11 @@
 The ACT policy observes shoulder and wrist RGB images plus the six arm joint
 positions and the measured finger opening (``--gripper-state command`` keeps
 the older commanded opening).  Its action is the *next* sampled joint target
-and gripper command.  The one-sample shift matters because each source row was
-recorded after applying that row's control; using the unshifted control would
-teach a nearly identity state-to-action mapping.
+and gripper command -- or, for scripted demos with corrective labels, the
+expert's clean target from that state (``ctrl_label``).  The one-sample shift
+matters because each source row was recorded after applying that row's
+control; using the unshifted control would teach a nearly identity
+state-to-action mapping.
 """
 
 from __future__ import annotations
@@ -105,6 +107,8 @@ def main() -> None:
             with np.load(episode / "trajectory.npz") as data:
                 q = np.asarray(data["q"], dtype=np.float32)
                 ctrl = np.asarray(data["ctrl"], dtype=np.float32)
+                target = np.asarray(data["ctrl_label"] if "ctrl_label" in data.files
+                                    else ctrl, dtype=np.float32)
                 if measured and "finger_opening" not in data.files:
                     raise SystemExit(f"{episode}: no finger_opening; re-render with "
                                      "teleop/render_vla_dataset.py")
@@ -114,7 +118,7 @@ def main() -> None:
                 raise ValueError(f"{episode}: unexpected q/ctrl shapes {q.shape}/{ctrl.shape}")
 
             state = np.concatenate([q, gripper[:, None]], axis=1)
-            action = np.concatenate([ctrl[1:], ctrl[-1:]], axis=0)
+            action = np.concatenate([target[1:], target[-1:]], axis=0)
             for frame_i in range(len(q)):
                 shoulder_path = episode / "shoulder" / f"{frame_i:05d}.jpg"
                 wrist_path = episode / "wrist" / f"{frame_i:05d}.jpg"

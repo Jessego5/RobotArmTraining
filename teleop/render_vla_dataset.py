@@ -146,7 +146,9 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
         if missing:
             raise ValueError(f"{path}: missing fields {sorted(missing)}")
         indices = sample_indices(source["t"], hz)
-        arrays = {key: np.asarray(source[key])[indices].copy() for key in required}
+        # Scripted demos may add corrective action labels (tools/scripted_demos.py).
+        optional = {"ctrl_label"} & set(source.files)
+        arrays = {key: np.asarray(source[key])[indices].copy() for key in required | optional}
 
     # The final row has no demonstrated successor and therefore no action.
     if len(indices) < 2:
@@ -185,6 +187,7 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
             ee_quat=arrays["ee_quat"].astype(np.float32),
             gripper=arrays["gripper"].astype(np.float32),
             finger_opening=finger_opening,
+            **{key: arrays[key].astype(np.float32) for key in optional},
         )
         (temp / "source.json").write_text(json.dumps({
             "episode": path.name,
@@ -202,13 +205,14 @@ def render_episode(path: Path, output: Path, sim: PantheraSim,
     return len(indices)
 
 
-def is_current_render(destination: Path) -> bool:
-    """True for a finished render that includes posed fingers."""
+def is_current_render(destination: Path, source: Path) -> bool:
+    """True for a finished render with posed fingers and the source's labels."""
     trajectory = destination / "trajectory.npz"
     if not trajectory.is_file():
         return False
-    with np.load(trajectory) as cached:
-        return "finger_opening" in cached.files
+    with np.load(trajectory) as cached, np.load(source / "data.npz") as recorded:
+        labels_missing = "ctrl_label" in recorded.files and "ctrl_label" not in cached.files
+        return "finger_opening" in cached.files and not labels_missing
 
 
 def main() -> None:
@@ -237,7 +241,7 @@ def main() -> None:
     try:
         for number, episode in enumerate(episodes, 1):
             destination = args.output / episode.name
-            complete = is_current_render(destination)
+            complete = is_current_render(destination, episode)
             if complete and not args.force:
                 with np.load(destination / "trajectory.npz") as cached:
                     count = len(cached["q"])

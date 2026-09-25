@@ -133,6 +133,15 @@ the teleoperation episode format, and every kept episode also succeeds when
 replayed at 10 Hz (`tools/replay_actions.py`). `bash tools/pod_scripted.sh`
 generates, renders, trains and evaluates ACT on them.
 
+`--augment-fraction` perturbs that share of episodes DART-style: a smooth
+random offset is added to the executed motion, some grasps start sideways and
+are retried after a miss, and `data.npz` gains `ctrl_label`, the expert's clean
+target from the state actually reached. The ACT dataset builder trains on
+those labels, so augmented demos teach corrections rather than the noise.
+The VLA RLDS builder still uses executed end-effector motion, so use clean
+demos for VLA-Adapter. `bash tools/pod_scripted.sh 600 150000 25000 0.5` runs
+the augmented variant.
+
 Temporal ensembling is enabled by default to smooth transitions between ACT
 action chunks. Pass `--no-temporal-ensemble` to compare against the checkpoint's
 original 10-step open-loop action queue.
