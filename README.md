@@ -127,6 +127,12 @@ command. `--keep-every N` keeps a separate checkpoint every N steps, and
 On a prepared GPU pod, `bash tools/pod_act_sweep.sh` rebuilds the dataset and
 runs both steps.
 
+`tools/scripted_demos.py` generates demonstrations from a privileged scripted
+expert that stacks red, green, then blue with the human grasp pose. They use
+the teleoperation episode format, and every kept episode also succeeds when
+replayed at 10 Hz (`tools/replay_actions.py`). `bash tools/pod_scripted.sh`
+generates, renders, trains and evaluates ACT on them.
+
 Temporal ensembling is enabled by default to smooth transitions between ACT
 action chunks. Pass `--no-temporal-ensemble` to compare against the checkpoint's
 original 10-step open-loop action queue.

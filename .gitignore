@@ -35,6 +35,7 @@ MUJOCO_LOG.TXT
 
 # Generated recordings, calibration captures, and renders
 /data/
+/data_scripted/
 /calib_frames/
 /replay_grid.mp4
 
