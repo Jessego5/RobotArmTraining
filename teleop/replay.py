@@ -31,7 +31,7 @@ def replay(path: Path) -> None:
     if "t" not in data or "q" not in data:
         raise SystemExit(f"{path / 'data.npz'} does not contain t and q")
 
-    sim = PantheraSim()
+    sim = PantheraSim(REPO_ROOT / meta.get('scene', 'sim/panthera/scene.xml'))
     renderer = mujoco.Renderer(sim.model, height=720, width=960)
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultFreeCamera(sim.model, camera)
@@ -43,6 +43,8 @@ def replay(path: Path) -> None:
     try:
         for index, seconds in enumerate(data["t"]):
             sim.data.qpos[sim.arm_qadr] = data["q"][index]
+            if "finger_q" in data:
+                sim.data.qpos[sim.finger_qadr] = data["finger_q"][index]
             if ("obj_pos" in data and "obj_quat" in data
                     and data["obj_pos"].shape[1] == len(sim.object_names)):
                 sim.set_object_poses(data["obj_pos"][index],

@@ -186,7 +186,17 @@ class CachedLeRobotDataset(LeRobotDataset):
     """LeRobotDataset that serves image tensors from a decoded mmap cache."""
 
     def __init__(self, *args: Any, image_cache: Path | None = None, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+        # LeRobot iterates a formatted index column inside its constructor.
+        # Hugging Face custom transforms receive every column, so leaving
+        # images present there unnecessarily decodes the entire dataset.
+        self._requested_image_cache = image_cache
+        self._initializing = True
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            self._initializing = False
+        # Restore normal sample decoding after LeRobot builds its numeric index.
+        self.hf_dataset.set_format(**self._sample_format)
         self._decoded_image_cache: np.memmap | None = None
         self._cached_camera_keys: list[str] = []
         if image_cache is None:
@@ -202,7 +212,15 @@ class CachedLeRobotDataset(LeRobotDataset):
         # modifying the on-disk cache.  Float conversion below creates the only
         # per-sample copy.
         self._decoded_image_cache = np.load(image_cache, mmap_mode="c")
-        self.hf_dataset = self.hf_dataset.remove_columns(self._cached_camera_keys)
+
+    def load_hf_dataset(self):
+        dataset = super().load_hf_dataset()
+        if self._requested_image_cache is not None:
+            dataset = dataset.remove_columns(list(self.meta.camera_keys))
+        if getattr(self, "_initializing", False):
+            self._sample_format = dataset.format
+            dataset = dataset.with_format(None)
+        return dataset
 
     @property
     def uses_image_cache(self) -> bool:

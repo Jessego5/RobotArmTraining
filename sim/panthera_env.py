@@ -87,6 +87,12 @@ class PantheraSim:
             self.model.jnt_range[
                 mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)]
             for j in ARM_JOINTS])
+        self.finger_qadr = np.array([
+            self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)]
+            for name in ("L_finger_joint", "R_finger_joint")])
+        self.finger_dofadr = np.array([
+            self.model.jnt_dofadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)]
+            for name in ("L_finger_joint", "R_finger_joint")])
         self.grip_act = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "gripper")
 

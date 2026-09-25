@@ -17,6 +17,7 @@ their final pose), or ``--no-labels`` for a clean wall of footage.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -52,6 +53,8 @@ class Replay:
     ctrl: np.ndarray | None
     obj_pos: np.ndarray | None
     obj_quat: np.ndarray | None
+    finger_q: np.ndarray | None = None
+    scene: str = 'sim/panthera/scene.xml'
 
     @property
     def duration(self) -> float:
@@ -93,12 +96,17 @@ def load_replay(path: Path) -> Replay:
                    if "obj_pos" in data else None)
         obj_quat = (np.asarray(data["obj_quat"], dtype=float).copy()
                     if "obj_quat" in data else None)
+        finger_q = (np.asarray(data['finger_q'], dtype=float).copy()
+                    if 'finger_q' in data else None)
     if not len(t) or len(q) != len(t):
         raise SystemExit(f"{npz_path} is empty or has mismatched t/q arrays")
     # Old recordings normally start near zero, but make the compositor robust
     # to absolute or offset timestamps.
     t -= t[0]
-    return Replay(path, path.name, t, q, ctrl, obj_pos, obj_quat)
+    meta_path = path / 'meta.json'
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    return Replay(path, path.name, t, q, ctrl, obj_pos, obj_quat, finger_q,
+                  meta.get('scene', 'sim/panthera/scene.xml'))
 
 
 def front_camera(model: mujoco.MjModel) -> mujoco.MjvCamera:
@@ -130,7 +138,10 @@ def render_video(replays: list[Replay], output: Path, *, columns: int,
     tile_w = max(width // columns, 1)
     tile_h = max(height // rows, 1)
 
-    sim = PantheraSim()
+    scenes = {replay.scene for replay in replays}
+    if len(scenes) != 1:
+        raise ValueError('Grid replay requires episodes from the same scene.')
+    sim = PantheraSim(REPO_ROOT / scenes.pop())
     renderer = mujoco.Renderer(sim.model, height=tile_h, width=tile_w)
     cam = front_camera(sim.model)
 
@@ -168,6 +179,8 @@ def render_video(replays: list[Replay], output: Path, *, columns: int,
                 sim.data.qpos[:] = sim.model.qpos0
                 sim.data.ctrl[:] = 0.0
                 sim.data.qpos[sim.arm_qadr] = replay.q[sample_i]
+                if replay.finger_q is not None:
+                    sim.data.qpos[sim.finger_qadr] = replay.finger_q[sample_i]
                 if replay.ctrl is not None:
                     nctrl = min(sim.model.nu, replay.ctrl.shape[1])
                     sim.data.ctrl[:nctrl] = replay.ctrl[sample_i, :nctrl]

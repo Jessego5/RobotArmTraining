@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,8 +22,11 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_INPUT = REPO_ROOT / "VLA-Adapter" / "data" / "robot_arm_learning_rendered"
-DEFAULT_OUTPUT = REPO_ROOT / "outputs" / "lerobot" / "panthera_stack"
+sys.path.insert(0, str(REPO_ROOT))
+from teleop.dataset_contract import DEFAULT_RENDERED, DEFAULT_DATASET, validate_rendered, file_hash
+
+DEFAULT_INPUT = DEFAULT_RENDERED
+DEFAULT_OUTPUT = DEFAULT_DATASET
 JOINT_NAMES = [f"joint{i}" for i in range(1, 7)] + ["gripper_open_m"]
 
 
@@ -67,10 +71,12 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    manifest = json.loads((args.input / "manifest.json").read_text())
+    manifest = validate_rendered(args.input)
     fps = int(round(float(manifest["sample_hz"])))
+    if not np.isclose(fps, manifest["sample_hz"]):
+        raise ValueError("LeRobot export requires an integer sample rate")
     height, width = map(int, manifest["image_size"])
-    episodes = episode_paths(args.input)
+    episodes = [args.input / name for name in manifest["episodes"]]
     if len(episodes) != int(manifest["num_episodes"]):
         raise SystemExit(
             f"manifest says {manifest['num_episodes']} episodes but found {len(episodes)}"
@@ -95,14 +101,17 @@ def main() -> None:
             with np.load(episode / "trajectory.npz") as data:
                 q = np.asarray(data["q"], dtype=np.float32)
                 ctrl = np.asarray(data["ctrl"], dtype=np.float32)
+                if not np.allclose(np.diff(data["t"]), 1 / fps, atol=1e-7):
+                    raise ValueError(f"{episode}: nonuniform sample times")
             if len(q) < 2 or ctrl.shape != (len(q), 7):
                 raise ValueError(f"{episode}: unexpected q/ctrl shapes {q.shape}/{ctrl.shape}")
 
             # The current gripper command is the best available proprioceptive
             # value; finger joint positions were not included in the recording.
             state = np.concatenate([q, ctrl[:, 6:7]], axis=1)
-            action = np.concatenate([ctrl[1:], ctrl[-1:]], axis=0)
-            for frame_i in range(len(q)):
+            # Drop the last observation: it has no demonstrated future action.
+            action = ctrl[1:]
+            for frame_i in range(len(q) - 1):
                 shoulder_path = episode / "shoulder" / f"{frame_i:05d}.jpg"
                 wrist_path = episode / "wrist" / f"{frame_i:05d}.jpg"
                 if not shoulder_path.is_file() or not wrist_path.is_file():
@@ -120,14 +129,20 @@ def main() -> None:
                 })
             dataset.save_episode()
             print(
-                f"[{ep_i + 1:03d}/{len(episodes):03d}] {episode.name}: {len(q)} frames",
+                f"[{ep_i + 1:03d}/{len(episodes):03d}] {episode.name}: {len(q) - 1} frames",
                 flush=True,
             )
     finally:
         dataset.finalize()
         dataset.stop_image_writer()
 
-    print(f"wrote {len(episodes)} episodes / {manifest['num_frames']} frames to {args.output}")
+    provenance = {"version": 2, "fps": fps, "rendered_root": str(args.input.resolve()),
+                  "render_manifest_sha256": file_hash(args.input / "manifest.json"),
+                  "converter_sha256": file_hash(Path(__file__)),
+                  "state_gripper": "command", "action_alignment": "next_uniform_sample",
+                  "sources": {p.name: json.loads((p / "source.json").read_text()) for p in episodes}}
+    (args.output / "meta/provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    print(f"wrote {len(episodes)} episodes / {manifest['num_frames'] - len(episodes)} frames to {args.output}")
 
 
 if __name__ == "__main__":

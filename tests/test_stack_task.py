@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from sim.stack_task import CUBE_EDGE, TABLE_CUBE_Z, StackReward, stack_metrics
+from sim.stack_task import CUBE_EDGE, TABLE_CUBE_Z, StackReward, stack_metrics, task_potential
 
 
 class StackMetricsTest(unittest.TestCase):
@@ -37,6 +37,22 @@ class StackMetricsTest(unittest.TestCase):
         for expected in (False, False, True):
             _value, success, _metrics = reward.step(self.three, ee, grasped=False)
             self.assertEqual(success, expected)
+
+    def test_potential_shaping_uses_learner_discount(self):
+        far = np.array([0.8, 0.0, 0.4])
+        near = self.flat[0].copy()
+        reward = StackReward(
+            gamma=0.9, action_delta_coef=0.0, action_acceleration_coef=0.0
+        )
+        initial = reward.reset(self.flat, far)["potential"]
+        near_potential, _ = task_potential(self.flat, near, False)
+        first, _success, _metrics = reward.step(self.flat, near, False)
+        second, _success, _metrics = reward.step(self.flat, far, False)
+        self.assertAlmostEqual(first, 0.9 * near_potential - initial - 0.01)
+        self.assertAlmostEqual(second, 0.9 * initial - near_potential - 0.01)
+        # A progress/reversal cycle is no longer profitable under the same
+        # discounted return optimized by PPO.
+        self.assertLess(first + 0.9 * second, 0.0)
 
 
 if __name__ == "__main__":

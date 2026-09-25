@@ -656,6 +656,7 @@ def main() -> None:
     motion_armed = True
     stuck_n = 0
     last = time.time()
+    physics_remainder = 0.0
     fps_ema = 60.0
     print(__doc__.split("Controls")[1])
     if minecraft:
@@ -874,7 +875,12 @@ def main() -> None:
                                    q_init=q_cmd)
         sim.set_arm_ctrl(q_cmd)
         sim.set_gripper(grip)
-        sim.step(max(int(dt / sim.dt), 1))
+        # Carry fractional ticks forward instead of losing simulation time on
+        # every display frame. Record actual simulation time independently.
+        physics_remainder += dt / sim.dt
+        physics_steps = int(physics_remainder)
+        physics_remainder -= physics_steps
+        sim.step(physics_steps)
 
         # ---- render ----
         # Each view is a separate pass into its own sub-viewport of the one
@@ -980,6 +986,10 @@ def main() -> None:
             obj_p, obj_q = sim.object_poses()
             episode.add({
                 "t": now - episode.t0,
+                "sim_time": float(sim.data.time),
+                "physics_steps": physics_steps,
+                "finger_q": sim.data.qpos[sim.finger_qadr].copy(),
+                "finger_dq": sim.data.qvel[sim.finger_dofadr].copy(),
                 "q": sim.q, "dq": sim.dq, "ctrl": sim.data.ctrl.copy(),
                 "ee_pos": ee_p, "ee_quat": ee_q,
                 "obj_pos": obj_p, "obj_quat": obj_q,

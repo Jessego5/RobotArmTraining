@@ -19,6 +19,20 @@ TABLE_CUBE_Z = 0.0725
 CUBE_EDGE = 0.045
 
 
+def ordered_two_stack_metrics(positions: np.ndarray) -> dict:
+    """Red (column 0) released on green (column 1), with green on the table."""
+    positions = np.asarray(positions, dtype=np.float64)
+    if positions.shape != (2, 3):
+        raise ValueError(f"expected two xyz cube positions, got {positions.shape}")
+    upper, lower = positions
+    xy = float(np.linalg.norm(upper[:2] - lower[:2]))
+    dz = float(upper[2] - lower[2])
+    success = bool(xy <= .012 and .032 < dz < .060
+                   and abs(lower[2] - TABLE_CUBE_Z) < .01)
+    return dict(two_stack=success, positions=positions.tolist(),
+                horizontal_alignment_m=xy, vertical_gap_m=dz)
+
+
 def _ordered_pair_score(lower: np.ndarray, upper: np.ndarray) -> float:
     """Soft score for ``upper`` being supported by ``lower``."""
     xy = np.linalg.norm(upper[:2] - lower[:2])
@@ -114,6 +128,9 @@ class StackReward:
     """Episode-local reward state and stable-success detector."""
 
     success_hold_steps: int = 5
+    gamma: float = 0.99
+    action_delta_coef: float = 0.01
+    action_acceleration_coef: float = 0.02
     previous_potential: float = 0.0
     two_stack_seen: bool = False
     full_stack_seen: bool = False
@@ -132,13 +149,22 @@ class StackReward:
         ee_pos: np.ndarray,
         grasped: bool,
         action_delta: np.ndarray | None = None,
+        action_acceleration: np.ndarray | None = None,
     ) -> tuple[float, bool, dict]:
         potential, metrics = task_potential(positions, ee_pos, grasped)
-        reward = potential - self.previous_potential - 0.01
+        # Potential-based shaping must include the same discount used by the
+        # learner.  Using ``potential - previous_potential`` with gamma < 1
+        # makes a forward/backward cycle profitable because the negative half
+        # arrives later.  That is a direct incentive for oscillation.
+        reward = self.gamma * potential - self.previous_potential - 0.01
         self.previous_potential = potential
 
         if action_delta is not None:
-            reward -= 0.001 * float(np.square(action_delta).mean())
+            reward -= self.action_delta_coef * float(np.square(action_delta).mean())
+        if action_acceleration is not None:
+            reward -= self.action_acceleration_coef * float(
+                np.square(action_acceleration).mean()
+            )
         if metrics["two_stack"] and not self.two_stack_seen:
             reward += 5.0
             self.two_stack_seen = True
