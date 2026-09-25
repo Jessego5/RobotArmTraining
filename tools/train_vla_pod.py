@@ -12,6 +12,11 @@ Python 3.10 environment for everything else.
     python3 tools/train_vla_pod.py --steps 50          # end-to-end smoke test
     python3 tools/train_vla_pod.py --steps 20000
     python3 tools/train_vla_pod.py --steps 30000 --resume-run-id <RUN_ID>
+
+    # Scripted demonstrations, reusing frames rendered by tools/pod_scripted.sh
+    python3 tools/train_vla_pod.py --episodes-dir outputs/scripted_input_600 \
+        --rendered-dir outputs/rendered_scripted_600 \
+        --rlds-dir VLA-Adapter/data/robot_arm_learning_scripted_600
 """
 
 from __future__ import annotations
@@ -128,9 +133,17 @@ def main() -> None:
     parser.add_argument("--resume-run-id", default="")
     parser.add_argument("--resume-learning-rate", type=float)
     parser.add_argument("--wandb-entity", default="")
+    parser.add_argument("--episodes-dir", type=Path, default=CODE_DIR / "data",
+                        help="recorded episodes; the default downloads the teleop demos")
+    parser.add_argument("--rendered-dir", type=Path, default=RENDERED_DIR)
+    parser.add_argument("--rlds-dir", type=Path, default=RLDS_DIR,
+                        help="RLDS output; use a separate one per set of episodes")
     parser.add_argument("--cpus", type=int,
                         help="CPUs to use (default: the container's cgroup quota)")
     args = parser.parse_args()
+    # Training runs with VLA-Adapter/ as its working directory.
+    for name in ("episodes_dir", "rendered_dir", "rlds_dir"):
+        setattr(args, name, getattr(args, name).resolve())
     limit_cpus(args.cpus)
 
     python = str(args.venv / "bin/python")
@@ -171,17 +184,18 @@ def main() -> None:
     render_env = notebook_globals["render_env"]
 
     # 3. Demonstrations, observations and RLDS (cells 9 and 12).
-    if not any((CODE_DIR / "data").glob("episode_*/data.npz")):
+    teleop_data = args.episodes_dir.resolve() == (CODE_DIR / "data").resolve()
+    if teleop_data and not any(args.episodes_dir.glob("episode_*/data.npz")):
         run([python, "-c",
              "from huggingface_hub import snapshot_download; snapshot_download("
              f"repo_id={DATASET_REPO!r}, repo_type='dataset', revision={DATASET_REVISION!r}, "
              f"local_dir={str(CODE_DIR)!r}, allow_patterns=["
              "'data/episode_*/data.npz', 'data/episode_*/meta.json'])"])
     run([python, CODE_DIR / "teleop/render_vla_dataset.py",
-         "--input", CODE_DIR / "data", "--output", RENDERED_DIR,
+         "--input", args.episodes_dir, "--output", args.rendered_dir,
          "--hz", str(SAMPLE_HZ), "--size", "256"], env=render_env)
     run([python, CODE_DIR / "teleop/build_robot_arm_learning_rlds.py",
-         "--rendered-dir", RENDERED_DIR, "--data-dir", RLDS_DIR,
+         "--rendered-dir", args.rendered_dir, "--data-dir", args.rlds_dir,
          "--instruction", INSTRUCTION, "--val-fraction", str(VAL_FRACTION),
          "--split-seed", str(VAL_SPLIT_SEED)])
 
@@ -218,7 +232,7 @@ def main() -> None:
         VLA_DIR / "vla-scripts/finetune.py",
         "--vlm_path", MODEL_DIR,
         "--config_file_path", VLA_DIR / "pretrained_models/configs",
-        "--data_root_dir", RLDS_DIR,
+        "--data_root_dir", args.rlds_dir,
         "--dataset_name", "robot_arm_learning_panthera",
         "--run_root_dir", args.output_root,
         "--run_id_override", run_id,
