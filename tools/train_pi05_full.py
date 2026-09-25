@@ -10,6 +10,9 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 LEROBOT_COMMIT = "e624f3f7f8411ec3a02635d06e79373341e5ef35"
 CAMERAS = ["observation.images.shoulder", "observation.images.wrist"]
@@ -233,6 +236,11 @@ def install_guards():
         (checkpoint / "PI05_COMPLETE").write_text("Model, processors, optimizer and deployment contract saved.\n")
         # Point last at the successful replacement before removing old snapshots.
         trainer.update_last_checkpoint(checkpoint)
+        drive_root = os.environ.get("PI05_DRIVE_BACKUP_ROOT")
+        if drive_root:
+            from tools.pi05_checkpoint_backup import backup_checkpoint
+            result = backup_checkpoint(checkpoint, drive_root)
+            (run_state["output"] / "drive_backup.json").write_text(json.dumps(result, indent=2))
         removed = prune_checkpoints(checkpoint, keep_checkpoints)
         saved_bytes = sum(p.stat().st_size for p in checkpoint.rglob("*") if p.is_file())
         storage = {"last_checkpoint_gib": saved_bytes / 2**30, "keep_checkpoints": keep_checkpoints,

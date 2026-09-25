@@ -58,6 +58,9 @@ def main():
     # Set WORK_DIR to a persistent SSD/NVMe mount on your GPU machine.
     WORK_DIR = (Path.cwd() / "pi05_ik3").resolve()
     RUN_NAME = "pi05_ik3_full_001"  # Change for a new experiment.
+    SAVE_TO_DRIVE = True            # Mount/authenticate before setup; back up every completed checkpoint.
+    DRIVE_ROOT = Path("/content/drive/MyDrive/pi05_ik3")
+    RESUME_FROM_DRIVE = False       # Restore the latest backup for RUN_NAME, including optimizer/RNG.
     DATASET_REPO = "FoxNerdSaysMoo/panthera-ik-three-block-stack-30hz"
     DATASET_REVISION = "DATASET_REVISION_PLACEHOLDER"
     LEROBOT_COMMIT = "e624f3f7f8411ec3a02635d06e79373341e5ef35"
@@ -90,12 +93,37 @@ def main():
     md('''
     ## 1. Install an isolated, pinned environment
 
+    **Google Drive access is requested first**, before package installation or
+    downloads. Approve it now so checkpoints can be backed up unattended later.
+    Only the latest complete checkpoint for this run is retained on Drive; a new
+    copy finishes before the old one is removed. Both model and optimizer/RNG state
+    are included for resuming. Data, base weights, and caches stay on local disk.
+
     The Jupyter kernel only orchestrates subprocesses; training uses its own Python
     3.12 environment. No kernel restart is needed. Downloads and logs stream into
     the cells. Setup does not modify your other Python environments.
     ''')
     code('''
     import os, sys, subprocess, shutil, json, time
+    if RESUME_FROM_DRIVE and not SAVE_TO_DRIVE:
+        raise ValueError("RESUME_FROM_DRIVE requires SAVE_TO_DRIVE=True")
+    DRIVE_RUN_DIR = DRIVE_ROOT / RUN_NAME
+    if SAVE_TO_DRIVE:
+        try:
+            from google.colab import drive
+        except ImportError:
+            if not DRIVE_ROOT.is_dir():
+                raise RuntimeError("Outside Colab, mount Drive yourself and set DRIVE_ROOT to that existing folder, "
+                                   "or set SAVE_TO_DRIVE=False.")
+        else:
+            drive.mount("/content/drive")  # Any access prompt happens BEFORE installation/downloads.
+        DRIVE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+        import tempfile
+        with tempfile.NamedTemporaryFile(dir=DRIVE_RUN_DIR, prefix=".pi05-write-probe-") as probe:
+            probe.write(b"pi05 checkpoint backup write check"); probe.flush()
+        print("Drive checkpoint backup ready:", DRIVE_RUN_DIR)
+        if RESUME_FROM_DRIVE and not (DRIVE_RUN_DIR / "latest.json").is_file():
+            raise FileNotFoundError(f"No saved checkpoint pointer in {DRIVE_RUN_DIR}")
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     free_gib = shutil.disk_usage(WORK_DIR).free / 2**30
     print(f"Free storage on {WORK_DIR}: {free_gib:.1f} GiB")
@@ -145,6 +173,10 @@ def main():
                      TMPDIR=str(WORK_DIR / "tmp"), TOKENIZERS_PARALLELISM="false", MUJOCO_GL="egl",
                      CUDA_VISIBLE_DEVICES="0", PI05_KEEP_CHECKPOINTS=str(KEEP_CHECKPOINTS))
     Path(CHILD_ENV["TMPDIR"]).mkdir(exist_ok=True)
+    if SAVE_TO_DRIVE:
+        CHILD_ENV["PI05_DRIVE_BACKUP_ROOT"] = str(DRIVE_RUN_DIR)
+    else:
+        CHILD_ENV.pop("PI05_DRIVE_BACKUP_ROOT", None)
     run(UV + ["sync", "--frozen", "--extra", "pi", "--extra", "training", "--python", "3.12"],
         cwd=LEROBOT_DIR, env=CHILD_ENV)
     PYTHON = LEROBOT_DIR / ".venv/bin/python"
@@ -317,7 +349,7 @@ def main():
             "--max_eval_samples=128", "--env_eval_freq=0", "--log_freq=20",
             f"--seed={SEED}"] + wandb_flags()
     SMOKE_OUTPUT = WORK_DIR / "runs" / (RUN_NAME + "_smoke_" + time.strftime("%Y%m%d_%H%M%S"))
-    if not RESUME_CHECKPOINT:
+    if not RESUME_CHECKPOINT and not RESUME_FROM_DRIVE:
         smoke_command = [a for a in train_command(SMOKE_OUTPUT, 4, 4, 4) if not str(a).startswith("--wandb.")]
         run(smoke_command + ["--save_checkpoint=false", "--wandb.enable=false"],
             env=CHILD_ENV, log=LOG_DIR / "smoke.log")
@@ -336,6 +368,15 @@ def main():
     configuration cell, and this cell. The checkpoint's training configuration is
     authoritative; `TRAIN_STEPS` is the desired **total**, not extra steps.
 
+    To resume after a Colab reset, keep the same `RUN_NAME`/`DRIVE_ROOT` and set
+    **`RESUME_FROM_DRIVE=True`**. The latest Drive backup is copied back to local
+    storage and its checksums verified before training resumes. Each checkpoint
+    save backs up the complete resumable checkpoint to
+    `MyDrive/pi05_ik3/<RUN_NAME>/<step>/`; `latest.json` identifies the latest copy.
+    Drive needs space for the current backup plus its replacement while copying.
+    Backup failures stop with an error while preserving the local checkpoint and
+    the previous complete Drive backup. No Drive access prompt occurs at save time.
+
     Use persistent storage. By default only the latest two completed checkpoints
     from this run are retained. A replacement is fully saved before an older one
     is removed, so temporary space for a third is needed (or two if retention is 1).
@@ -350,6 +391,17 @@ def main():
     `wandb sync <offline-run-directory>` from the isolated environment.
     ''')
     code('''
+    if RESUME_FROM_DRIVE:
+        CHILD_ENV["PI05_RESTORE_ROOT"] = str(WORK_DIR / "restored_checkpoints" / RUN_NAME)
+        python(r"""
+    import json, os
+    from pathlib import Path
+    from tools.pi05_checkpoint_backup import restore_latest_checkpoint
+    restored = restore_latest_checkpoint(os.environ['PI05_DRIVE_BACKUP_ROOT'], os.environ['PI05_RESTORE_ROOT'])
+    (Path(os.environ['PI05_RESTORE_ROOT'])/'restored.json').write_text(json.dumps({'path': str(restored)}))
+    print('Verified and restored Drive checkpoint:', restored)
+    """)
+        RESUME_CHECKPOINT = json.loads((Path(CHILD_ENV["PI05_RESTORE_ROOT"]) / "restored.json").read_text())["path"]
     if RESUME_CHECKPOINT:
         resume = Path(RESUME_CHECKPOINT).expanduser().resolve()
         assert (resume / "train_config.json").is_file(), resume
@@ -472,6 +524,9 @@ def main():
       normalization statistics, and `deployment.json`.
     - **Resume training:** retain the entire checkpoint directory, including
       `training_state`; the model-only directory is insufficient to resume AdamW.
+      With `SAVE_TO_DRIVE=True`, that complete checkpoint is backed up automatically
+      under `DRIVE_ROOT/RUN_NAME` after every save. The smoke run has no checkpoint
+      to back up. Drive keeps one complete backup, regardless of local retention.
     - **Full-model proof and peak memory:** `full_model_audit.json` and
       `peak_memory.json` in the run directory. These are written by an actual run.
     - **Videos and success rates:** `evaluations/*/summary.json`, per-seed JSON,

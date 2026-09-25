@@ -532,6 +532,13 @@ rates, confidence intervals, and saved rollout videos in runs grouped by the
 training run ID. API keys are entered securely; model checkpoint uploads are
 disabled. Select offline mode or turn off video uploads in the settings if desired.
 
+Google Drive backup is enabled by default in Colab. The mount/access prompt comes
+before package installation and downloads. Every completed training checkpoint is
+copied to `MyDrive/pi05_ik3/<RUN_NAME>/`, including optimizer/RNG state; only the
+latest complete Drive backup is retained, after its replacement finishes copying.
+Set `RESUME_FROM_DRIVE=True` with the same run name to restore and verify the latest
+backup automatically. Data and caches remain on the runtime's local disk.
+
 Supporting tools: `tools/train_pi05_full.py`, `tools/evaluate_pi05.py`,
 `tools/publish_pi05_dataset.py`, `tools/bundle_pi05_runtime.py`, and
 `tools/build_pi05_notebook.py`. The notebook pins the runtime bundle and data to

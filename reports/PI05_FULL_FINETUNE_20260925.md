@@ -15,7 +15,7 @@ updates, bfloat16, gradient checkpointing, all parameters in AdamW, no PEFT.
   SHA-256 for LFS files. `upload_manifest.json` contains all source hashes.
 - Data completion commit: `5bc24d17cba6dbaea531a80c3607cc3254473319`.
 - Data plus simulator/runtime commit pinned by the notebook:
-  `0c6d1f267172d47e15f013c192f602dc19ec024f`.
+  `cc138c0ea9ec5332a7754ee1b1f5be4de75b4226`.
 - LeRobot source: `e624f3f7f8411ec3a02635d06e79373341e5ef35`.
 - Base: `lerobot/pi05_base` at `b211f3d44c36b6acfcf7ae94a64e8e96f75a64ba`.
 
@@ -99,3 +99,28 @@ milestones, errors, and optionally saved videos. API keys are passed securely in
 the child process environment. Offline mode is supported; smoke runs remain unlogged.
 
 Update validation: six regression/integration tests passed. The notebook CLI and W&B training/evaluation metrics plus H.264 video logging passed an offline integration test; no remote W&B run was created during validation.
+
+## Runtime assets and Google Drive update
+
+The earlier bundle included visual meshes but accidentally omitted collision
+meshes. Previous simulator smoke checks used the full local checkout, concealing
+the packaging error. The bundler now includes the complete mesh tree and compiles
+the simulation in an isolated subprocess from a clean archive extraction before
+publication. The regression was reproduced using the old archive. The corrected
+archive compiled all 20 meshes and rendered both cameras from its isolated tree.
+
+The notebook now mounts Google Drive and checks write access before installation,
+model/data downloads, or GPU training. Each complete training checkpoint is copied
+to `DRIVE_ROOT/RUN_NAME/<step>` with model, processors, deployment contract, and
+optimizer/RNG state. The previous complete backup remains until the replacement
+and manifest are written, then `latest.json` is updated and the older managed
+backup removed. Other Drive folders are preserved. Failures preserve the local
+checkpoint and prior Drive backup, and stop with an error rather than silently
+losing persistence. The smoke run saves no checkpoint and performs no backup.
+
+`RESUME_FROM_DRIVE=True` restores the latest backup to local storage and verifies
+all file sizes and SHA-256 hashes before resuming. Ten tests passed, including
+isolated asset loading, rolling backups, interruption preservation, and corrupted
+restore rejection. Google Drive's actual authorization and mounted-filesystem
+behavior must run in the user's Colab session; local tests use a temporary
+filesystem, and no access to the user's Drive was attempted during development.

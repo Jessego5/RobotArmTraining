@@ -14,6 +14,27 @@ from tools.train_pi05_full import prune_checkpoints, tensor_bytes
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_runtime_meshes_cover_xml_references(tmp_path):
+    import xml.etree.ElementTree as ET
+    from tools.bundle_pi05_runtime import simulator_meshes
+    meshes = simulator_meshes(ROOT)
+    referenced = [(ROOT / "sim/panthera" / node.attrib["file"]).resolve()
+                  for node in ET.parse(ROOT / "sim/panthera/panthera.xml").iter("mesh")
+                  if "file" in node.attrib]
+    assert any("collision" in p.parts for p in referenced)
+    assert set(referenced).issubset({p.resolve() for p in meshes})
+    # Build only from the file list used by the bundler, in a fresh directory.
+    # Loading from the original checkout previously concealed missing assets.
+    import shutil
+    for source in [ROOT / "sim/panthera/scene.xml", ROOT / "sim/panthera/panthera.xml", *meshes]:
+        dest = tmp_path / source.relative_to(ROOT)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+    mujoco = pytest.importorskip("mujoco")
+    model = mujoco.MjModel.from_xml_path(str(tmp_path / "sim/panthera/scene.xml"))
+    assert model.nmesh == len(referenced)
+
+
 def test_success_requires_order_support_release_and_continuous_hold():
     correct = np.array([[.4, 0, .1175], [.4, 0, .0725], [.4, 0, .1625]])
     for positions, holding in ((correct[[2, 1, 0]], [0, 0, 0]),
