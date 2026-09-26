@@ -74,6 +74,9 @@ def main():
     CHUNK_SIZE = 50                  # Predict 1.67 s of actions at 30 Hz.
     ACTION_STEPS = 10                # Replan every 0.33 s during rollout.
     NUM_WORKERS = 8
+    IMAGE_AUGMENTATION = False       # Photometric jitter only (brightness, contrast,
+                                    # saturation, hue, sharpness). No affine: shifting the
+                                    # gripper-mounted wrist view would mislabel alignment.
     SEED = 20260925
     KEEP_CHECKPOINTS = 2             # Latest two complete checkpoints in THIS run.
                                     # Set 1 for less disk use; saves replacement before pruning.
@@ -327,6 +330,18 @@ def main():
         if WANDB_ENTITY:
             flags.append(f"--wandb.entity={WANDB_ENTITY}")
         return flags
+    def image_augmentation_flags():
+        if not IMAGE_AUGMENTATION:
+            return []
+        jitter = lambda kind, key, low, high: {"weight": 1.0, "type": kind, "kwargs": {key: [low, high]}}
+        tfs = {"brightness": jitter("ColorJitter", "brightness", .8, 1.2),
+               "contrast": jitter("ColorJitter", "contrast", .8, 1.2),
+               "saturation": jitter("ColorJitter", "saturation", .5, 1.5),
+               "hue": jitter("ColorJitter", "hue", -.05, .05),
+               "sharpness": jitter("SharpnessJitter", "sharpness", .5, 1.5)}
+        return ["--dataset.image_transforms.enable=true",
+                "--dataset.image_transforms.tfs=" + json.dumps(tfs)]
+
     def train_command(output, steps, save_freq, eval_freq):
         return [PYTHON, "-u", TRAINER,
             f"--dataset.repo_id={DATASET_REPO}", f"--dataset.root={DATA_ROOT}",
@@ -347,7 +362,7 @@ def main():
             f"--num_workers={NUM_WORKERS}", "--prefetch_factor=2",
             f"--steps={steps}", f"--save_freq={save_freq}", f"--eval_steps={eval_freq}",
             "--max_eval_samples=128", "--env_eval_freq=0", "--log_freq=20",
-            f"--seed={SEED}"] + wandb_flags()
+            f"--seed={SEED}"] + image_augmentation_flags() + wandb_flags()
     SMOKE_OUTPUT = WORK_DIR / "runs" / (RUN_NAME + "_smoke_" + time.strftime("%Y%m%d_%H%M%S"))
     if not RESUME_CHECKPOINT and not RESUME_FROM_DRIVE:
         smoke_command = [a for a in train_command(SMOKE_OUTPUT, 4, 4, 4) if not str(a).startswith("--wandb.")]

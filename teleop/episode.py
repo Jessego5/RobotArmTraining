@@ -44,7 +44,7 @@ class Episode:
     def save(self, out_dir: Path, meta: dict, fps: float,
              save_video: bool) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        optional = ("sim_time", "finger_q", "finger_dq", "physics_steps")
+        optional = ("sim_time", "finger_q", "finger_dq", "physics_steps", "ctrl_label")
         fields = (*FIELDS, *(key for key in optional if self.rows and all(key in row for row in self.rows)))
         arrays = {key: np.asarray([row[key] for row in self.rows])
                   for key in fields}

@@ -5,6 +5,10 @@ Uses the existing renderer and LeRobot schema/action alignment. Original rendere
 JPEG bytes are embedded in Parquet (no second lossy encoding or PNG expansion).
 Only each episode's disposable camera files are removed after embedding; raw
 recordings, rendered trajectories, source signatures and the manifest remain.
+
+Episodes recorded with corrective labels (``ctrl_label`` from
+``collect_scripted.py --augment-fraction``) export those labels as actions,
+resampled on the rendered 30 Hz grid; observations keep the executed state.
 """
 from __future__ import annotations
 import argparse
@@ -29,7 +33,8 @@ from lerobot.datasets.compute_stats import compute_episode_stats
 from datasets.table import embed_table_storage
 from teleop.build_lerobot_dataset import features
 from teleop.dataset_contract import file_hash, render_signature
-from teleop.render_vla_dataset import render_episode, shoulder_camera, wrist_camera
+from teleop.render_vla_dataset import (interpolate, recording_times, render_episode,
+                                       shoulder_camera, wrist_camera)
 from sim.panthera_env import PantheraSim
 
 
@@ -88,6 +93,7 @@ def main():
     if len(scenes) != 1:
         raise SystemExit('Export one scene per dataset.')
     scene = ROOT / scenes.pop()
+    sim_dt = PantheraSim(scene).dt
     status = args.input/'status.json'
     if status.exists() and not json.loads(status.read_text())['complete']:
         raise SystemExit('Wait for collection to complete before exporting.')
@@ -97,6 +103,7 @@ def main():
         fps=30, robot_type='panthera_ht_sim', features=features(256,256), use_videos=False,
         image_writer_threads=0, metadata_buffer_size=20)
     total = 0
+    labelled = 0
     sources = {}
     started = time.time()
     pool = ProcessPoolExecutor(max_workers=args.workers, initializer=init_renderer,
@@ -115,9 +122,16 @@ def main():
             dest = args.rendered/source.parent.name
             count, image_stats = pending.pop(i).result()
             with np.load(dest/'trajectory.npz') as data:
-                q, ctrl = data['q'], data['ctrl']
-                if not np.allclose(np.diff(data['t']), 1/30, atol=1e-7):
+                q, ctrl, sample_t = data['q'], data['ctrl'], data['t']
+                if not np.allclose(np.diff(sample_t), 1/30, atol=1e-7):
                     raise ValueError('Nonuniform timestamps')
+            with np.load(source) as raw:
+                if 'ctrl_label' in raw.files:
+                    times, _ = recording_times(raw, sim_dt)
+                    target = interpolate(times, raw['ctrl_label'], sample_t)
+                    labelled += 1
+                else:
+                    target = ctrl
             # LeRobot's native episode buffer accepts image paths; its embedding
             # step reads the JPEG bytes directly. No decode/re-encode is needed.
             buffer = dataset.episode_buffer
@@ -125,7 +139,7 @@ def main():
             buffer.update(size=count-1, task=[task]*(count-1),
                 timestamp=np.arange(count-1)/30, frame_index=np.arange(count-1))
             buffer['observation.state'] = np.c_[q[:-1],ctrl[:-1,6]].astype(np.float32)
-            buffer['action'] = ctrl[1:].astype(np.float32)
+            buffer['action'] = target[1:].astype(np.float32)
             for camera in ('shoulder','wrist'):
                 buffer[f'observation.images.{camera}'] = [
                     str(dest/camera/f'{j:05d}.jpg') for j in range(count-1)]
@@ -157,7 +171,9 @@ def main():
         converter_sha256=file_hash(ROOT/'teleop/build_lerobot_dataset.py'),
         scripted_exporter_sha256=file_hash(Path(__file__)),
         image_encoding='original renderer JPEG bytes', state_gripper='command',
-        action_alignment='next_uniform_sample', sources=sources)
+        action_alignment='next_uniform_sample',
+        action_source='ctrl_label' if labelled else 'ctrl', labelled_episodes=labelled,
+        sources=sources)
     (args.output/'meta/provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
     (args.output/'COMPLETE').write_text(f'{len(episodes)} episodes, {total-len(episodes)} frames\n')
 

@@ -11,7 +11,7 @@ from sim.stack_task import stack_metrics
 from teleop.episode import FIELDS
 from teleop.render_vla_dataset import recording_times, interpolate
 from teleop.dataset_contract import PhysicsClock
-from tools.collect_scripted import Planner
+from tools.collect_scripted import Augment, DemoFailure, Planner
 from tools.validate_scripted_dataset import replay
 from sim.stack_task import ordered_two_stack_metrics
 
@@ -80,6 +80,46 @@ class ScriptedCollectionTest(unittest.TestCase):
                     released = not any(sim.data.eq_active[e] for e in sim._grasp_eq)
                     stable = stable+1 if success and released else 0
                 self.assertGreaterEqual(stable, 30)
+
+
+    def test_state_waits_remove_pauses_without_changing_clean_labels(self):
+        timed, state = Planner(230927), Planner(230927, waits='state')
+        self.assertTrue(timed.run()['three_stack'])
+        self.assertTrue(state.run()['three_stack'])
+        self.assertNotIn('settle', [s['name'] for s in state.stages])
+        still = lambda p: np.sum(np.abs(np.diff([r['q'] for r in p.episode.rows], axis=0)).max(1) < 1e-5)
+        self.assertLess(still(state), still(timed) / 2)
+        for row in state.episode.rows:
+            np.testing.assert_array_equal(row['ctrl_label'], row['ctrl'])
+
+    def test_augmented_labels_correct_the_offset_and_gate_the_jaws(self):
+        augment = Augment(noise_pos=.008, noise_yaw=np.deg2rad(4), miss_prob=1.,
+                          miss_offset=.025, max_attempts=3)
+        for seed in range(230930, 230960):
+            planner = Planner(seed, waits='state', augment=augment)
+            try:
+                planner.run()
+            except DemoFailure:
+                continue
+            if planner.retries:
+                break
+        else:
+            self.fail('no augmented episode with a re-grasp succeeded')
+        rows = planner.episode.rows
+        label, executed = np.array([r['ctrl_label'] for r in rows]), np.array([r['ctrl'] for r in rows])
+        self.assertGreater(np.abs(label[:, :6] - executed[:, :6]).max(), .01)
+        stages = sorted((s['start'], s['name']) for s in planner.stages) + [(len(rows), 'end')]
+        spans = {}
+        for (start, name), (end, _) in zip(stages, stages[1:]):
+            spans.setdefault(name, []).append((start, end))
+        # The sideways first close: the executed jaws shut, the label keeps them open.
+        start, end = spans['1_close'][0]
+        self.assertLess(executed[start:end, 6].min(), .01)
+        self.assertGreater(label[start:end, 6].max(), .03)
+        # Re-opening after a miss is labelled as opening.
+        reopen = next(name for name in spans if name.endswith('_reopen'))
+        for start, end in spans[reopen]:
+            np.testing.assert_allclose(label[start:end, 6], executed[start:end, 6])
 
 
 if __name__ == '__main__':
