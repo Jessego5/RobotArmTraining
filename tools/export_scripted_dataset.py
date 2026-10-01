@@ -40,8 +40,22 @@ def init_renderer(scene):
     cameras = [shoulder_camera(render_sim.model), wrist_camera(render_sim.model)]
 
 
-def render_job(source, dest, settings):
-    count = render_episode(source, dest, render_sim, renderers, cameras, 30, 92, settings)
+def render_job(source, dest, settings, randomize_seed=None):
+    appearance = None
+    if randomize_seed is not None:
+        # Placeholder for sim-to-real: vary the look per episode (see the module).
+        from tools.domain_randomization import VisualRandomizer
+        global randomizer
+        if 'randomizer' not in globals():
+            randomizer = VisualRandomizer(render_sim.model)
+        appearance = randomizer.apply(randomize_seed, shoulder=cameras[0])
+    try:
+        count = render_episode(source, dest, render_sim, renderers, cameras, 30, 92, settings)
+    finally:
+        if appearance is not None:
+            randomizer.restore()
+    if appearance is not None:
+        (dest / 'appearance.json').write_text(json.dumps(dict(seed=randomize_seed, **appearance), indent=2) + '\n')
     image_features = {k:v for k,v in features(256,256).items() if v['dtype']=='image'}
     image_buffer = {key:[str(dest/key.rsplit('.',1)[-1]/f'{j:05d}.jpg')
                          for j in range(count-1)] for key in image_features}
@@ -77,6 +91,9 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT/'outputs/lerobot/panthera_scripted_stack_30hz')
     parser.add_argument('--min-free-gb', type=float, default=5.)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--domain-randomization', action='store_true',
+                        help='randomize table/floor/arm appearance, lighting and camera poses per episode')
+    parser.add_argument('--appearance-seed', type=int, default=0)
     args = parser.parse_args()
     if args.output.exists() or args.rendered.exists():
         raise SystemExit('Output/rendered directory already exists; use fresh paths to avoid overwriting data.')
@@ -110,7 +127,8 @@ def main():
     pending = {}
     def submit(i):
         source = episodes[i].parent
-        pending[i] = pool.submit(render_job, source, args.rendered/source.name, settings)
+        seed = [args.appearance_seed, i] if args.domain_randomization else None
+        pending[i] = pool.submit(render_job, source, args.rendered/source.name, settings, seed)
     for i in range(min(len(episodes), args.workers*2)):
         submit(i)
     try:
@@ -163,6 +181,12 @@ def main():
         scripted_exporter_sha256=file_hash(Path(__file__)),
         image_encoding='original renderer JPEG bytes', state_gripper='command',
         action_alignment='next_uniform_sample', sources=sources)
+    if args.domain_randomization:
+        from dataclasses import asdict
+        from tools.domain_randomization import Ranges
+        provenance['domain_randomization'] = dict(
+            appearance_seed=args.appearance_seed, ranges=asdict(Ranges()),
+            per_episode='appearance.json beside each rendered trajectory')
     (args.output/'meta/provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
     (args.output/'COMPLETE').write_text(f'{len(episodes)} episodes, {total-len(episodes)} frames\n')
 

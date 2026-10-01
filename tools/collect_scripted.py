@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import mujoco
 import numpy as np
-from sim.panthera_env import PantheraSim, mat_to_quat
+from sim.panthera_env import GRIPPER_OPEN, PantheraSim, mat_to_quat
 from sim.dynamics import CONTACT_DYNAMICS
 from sim.stack_task import stack_metrics, ordered_two_stack_metrics, CUBE_EDGE
 from teleop.dataset_contract import PhysicsClock, file_hash
@@ -43,14 +43,18 @@ def grasp_rotation(sim, index):
 
 
 class Planner:
-    def __init__(self, seed: int, blocks: int = 3, arm_start: str = "random"):
+    def __init__(self, seed: int, blocks: int = 3, arm_start: str = "random", sim: PantheraSim | None = None):
+        """`sim` hands the planner an existing simulation to continue (see `finish`)."""
         self.blocks = blocks
         self.arm_start = arm_start
         self.scene = ROOT / "sim/panthera" / ("scene_two_blocks.xml" if blocks == 2 else "scene.xml")
         self.seed = seed
         self.rng = np.random.default_rng(seed)
-        self.sim = PantheraSim(self.scene)
-        self.sim.reset(rng=self.rng)
+        if sim is None:
+            self.sim = PantheraSim(self.scene)
+            self.sim.reset(rng=self.rng)
+        else:
+            self.sim = sim
         self.clock = PhysicsClock(30, self.sim.dt)
         self.episode = Episode()
         self.stages = []
@@ -134,10 +138,20 @@ class Planner:
         mujoco.mj_forward(sim.model, sim.data)
         self.target, self.quat, self.qctrl = sim.ee_pos(), sim.ee_quat(), q
         self.hold('settle', .3)
+        for level, (block, support) in enumerate(self.pairs, start=1):
+            self.pick(level, block)
+            self.place(level, block, support)
+        return self.validate()
+
+    @property
+    def pairs(self):
         # Consistent color order avoids an ambiguous multimodal imitation target.
         # Red on green, then blue on red.
-        pairs = ((0, 1),) if self.blocks == 2 else ((0, 1), (2, 0))
-        for level, (block, support) in enumerate(pairs, start=1):
+        return ((0, 1),) if self.blocks == 2 else ((0, 1), (2, 0))
+
+    def pick(self, level, block):
+        sim = self.sim
+        if True:
             r = grasp_rotation(sim, block)
             quat = mat_to_quat(r)
             offset = .018*r[:,0]
@@ -155,6 +169,10 @@ class Planner:
             self.move(f'{level}_lift', above)
             if sim.object_poses()[0][block,2] < obj[2]+.04:
                 raise DemoFailure(f'{level}: failed lift')
+
+    def place(self, level, block, support):
+        sim = self.sim
+        if True:
             # Measured held offset accounts for contact seating and servo lag.
             held_offset = sim.ee_pos()-sim.object_poses()[0][block]
             dest = sim.object_poses()[0][support] + [0,0,CUBE_EDGE+.014]
@@ -166,6 +184,9 @@ class Planner:
             self.move(f'{level}_place', place)
             self.hold(f'{level}_release', .5, 1.)
             self.move(f'{level}_retreat', transit)
+
+    def validate(self):
+        sim = self.sim
         self.stages.append(dict(name='validate', start=len(self.episode)))
         for _ in range(30):
             self.tick(self.target, self.quat, 1.)
@@ -177,6 +198,48 @@ class Planner:
             if np.max(np.linalg.norm(np.diff(p[:,:2],axis=0),axis=1)) > .012:
                 raise DemoFailure('stack alignment exceeds 12 mm')
         return metrics
+
+    def completed_pairs(self) -> int:
+        """Leading pairs already stacked within the 12 mm acceptance alignment."""
+        positions = self.sim.object_poses()[0]
+        done = 0
+        for block, support in self.pairs:
+            upper, lower = positions[block], positions[support]
+            dz = upper[2] - lower[2]
+            if np.linalg.norm(upper[:2] - lower[:2]) > .012 or not .032 < dz < .060:
+                break
+            done += 1
+        return done
+
+    def finish(self):
+        """Take over the existing simulation mid-task and complete the stack.
+
+        First recover into a demonstrated state: keep carrying the cube that is
+        due next, otherwise open the jaws and rise. Then stack the remaining
+        pairs exactly as `run` does. Only these expert ticks are recorded.
+        """
+        sim = self.sim
+        self.target, self.quat = sim.ee_pose()
+        self.qctrl = sim.data.ctrl[:6].copy()
+        self.grip = float(np.clip(sim.data.ctrl[sim.grip_act] / GRIPPER_OPEN, 0, 1))
+        done = self.completed_pairs()
+        if done == len(self.pairs):
+            return self.validate()
+        level, (block, support) = done + 1, self.pairs[done]
+        held = np.flatnonzero(sim.grasp_flags())
+        carrying = held.size == 1 and held[0] == block
+        if not carrying:
+            if self.grip < 1.:
+                self.hold('recover_open', .5, 1.)
+            up = self.target.copy()
+            up[2] = max(up[2], sim.object_poses()[0][:, 2].max() + CUBE_EDGE + self.clearance)
+            self.move('recover_rise', up)
+            self.pick(level, block)
+        self.place(level, block, support)
+        for level, (block, support) in enumerate(self.pairs[done + 1:], start=done + 2):
+            self.pick(level, block)
+            self.place(level, block, support)
+        return self.validate()
 
 
 def attempt(seed, blocks=3, arm_start="random"):

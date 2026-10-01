@@ -368,6 +368,36 @@ remain grasped and elevated for 0.5 seconds. The experiment writes progress to
 `outputs/act/pickup_ablation_20260923/run_status.json` and its final paired results
 to `comparison.json` in that directory.
 
+## Expert-in-the-loop correction rounds (DAgger)
+
+`tools/dagger_rounds.py` alternates training and correction: train ACT from scratch
+on the base demonstrations plus all corrections so far, evaluate it on fixed scenes,
+then run it with `tools/dagger_act.py`. Privileged checks (closing away from the due
+cube, releasing off its support, grasping out of order, dropping a lifted cube, or
+six seconds without progress) hand control to the scripted planner
+(`Planner.finish`), which recovers into a demonstrated state and completes the
+stack. Only the expert's ticks are saved as new episodes. See
+[reports/DAGGER_ACT_20261001.md](reports/DAGGER_ACT_20261001.md).
+
+```bash
+OPENBLAS_NUM_THREADS=1 MUJOCO_GL=egl .venv-act/bin/python tools/dagger_rounds.py \
+  --work outputs/dagger --rounds 3 --interventions 100 --train-steps 60000
+```
+
+`--mode demos` runs the control arm: identical rounds that add the same number of
+fresh scripted demonstrations instead of corrections. Pass `--reuse-round0
+outputs/dagger` so both arms share the round-0 policy.
+
+## Visual domain randomization
+
+`tools/export_scripted_dataset.py --domain-randomization` gives every episode its
+own table and floor colours, arm finish, lighting and small camera-pose offsets
+(`tools/domain_randomization.py`). It is a placeholder for sim-to-real until real
+camera images exist. Cube hues are kept because the stacking order depends on them,
+every range is centred on the default scene, and only the rendering model changes:
+physics, recordings and the renderer's code are untouched. Each episode's drawn
+appearance is saved as `appearance.json` beside its rendered trajectory.
+
 ## RL fine-tuning ACT for three-block stacking
 
 `train_act_rl.py` continues from the imitation checkpoint with conservative
