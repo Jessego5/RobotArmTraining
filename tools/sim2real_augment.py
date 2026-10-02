@@ -51,7 +51,8 @@ PROMPTS = (
     f'a photo of {ARM} on a plywood table in a garage, mixed lighting',
 )
 NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, blurry, distorted, text, watermark, '
-            'wooden robot, bronze robot, copper robot, orange robot')
+            'wooden robot, bronze robot, copper robot, orange robot, '
+            'extra cubes, extra blocks, coloured objects, green object, red object, blue object')
 
 
 @dataclass(frozen=True)
@@ -62,15 +63,17 @@ class Settings:
     lcm_lora: str = 'latent-consistency/lcm-lora-sdv1-5'
     size: int = 512                 # SD 1.5's native resolution; output is resized back
     steps: int = 6
-    strength: float = .85           # how much of the render is replaced
+    strength: float = .75           # how much of the render is replaced
     guidance: float = 1.5
     depth_scale: float = .9
     canny_scale: float = .5
     # Fixed per-camera inverse-depth ranges (m), so brightness does not pulse.
     depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.))
     batch: int = 8
-    # Pixels whose render did not change since the previous frame keep the
-    # previous restyle: a fixed camera's background then cannot shimmer.
+    # Background pixels (sky, floor, table) whose render did not change since
+    # the previous frame keep the previous restyle, so a fixed camera's
+    # background cannot shimmer. The robot is always regenerated whole: carrying
+    # over only its still parts stitches one arm together from several frames.
     carry_static: bool = True
     static_threshold: int = 6       # max per-channel render change counted as still
     static_margin: int = 5          # px grown around anything that moved
@@ -136,7 +139,7 @@ class Restyler:
         self.torch = torch
 
     def episode(self, rgb: np.ndarray, depth: np.ndarray, segment: np.ndarray, keep: np.ndarray,
-                seed: int, camera: str) -> np.ndarray:
+                seed: int, camera: str, background: np.ndarray | None = None) -> np.ndarray:
         """Restyle one camera's frames of one episode; `keep` marks pixels copied back."""
         from PIL import Image
 
@@ -172,13 +175,23 @@ class Restyler:
                 if s.carry_static and index > 0:
                     moved = np.abs(rgb[index].astype(np.int16) - rgb[index - 1]).max(axis=2) > s.static_threshold
                     still = cv2.dilate(moved.astype(np.uint8), grow) == 0
+                    if background is not None:
+                        still &= background[index]
                     frame[still] = out[index - 1][still]
                 out[index] = frame
         return out
 
 
+def background_geom_ids(model) -> list[int]:
+    """Scenery that never moves: the floor and every geom of the table body."""
+    import mujoco
+    table = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, 'table')
+    return [i for i in range(model.ngeom)
+            if model.geom_bodyid[i] == table or mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) == 'floor']
+
+
 def scene_maps(sim, renderer, camera, cube_geoms) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Depth (m), per-pixel object ids and a cube mask for the current state."""
+    """Depth (m), per-pixel object ids (-1 for none) and a cube mask for the current state."""
     renderer.update_scene(sim.data, camera)
     renderer.enable_depth_rendering()
     depth = renderer.render().copy()
@@ -226,7 +239,9 @@ def restyle_rendered(dest: Path, sim, renderers, cameras, restyler: Restyler, se
             depth.append(d)
             segment.append(g)
             keep.append(k)
-        restyled = restyler.episode(rgb, np.stack(depth), np.stack(segment), np.stack(keep), seed, name)
+        segment = np.stack(segment)
+        background = (segment < 0) | np.isin(segment, background_geom_ids(sim.model))
+        restyled = restyler.episode(rgb, np.stack(depth), segment, np.stack(keep), seed, name, background)
         for path, frame in zip(paths, restyled):
             cv2.imwrite(str(path), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 92])
         sample = np.linspace(0, len(paths) - 1, min(20, len(paths))).astype(int)
@@ -275,8 +290,9 @@ def preview(args):
             segment.append(g)
             keep.append(k)
         rgb, depth, segment, keep = np.stack(rgb), np.stack(depth), np.stack(segment), np.stack(keep)
+        background = (segment < 0) | np.isin(segment, background_geom_ids(sim.model))
         clock = time.time()
-        restyled = restyler.episode(rgb, depth, segment, keep, args.seed, name)
+        restyled = restyler.episode(rgb, depth, segment, keep, args.seed, name, background)
         report[name + '_seconds_per_image'] = round((time.time() - clock) / len(rgb), 3)
         report[name] = dict(
             outline_recall=float(np.mean([boundary_recall(g, b) for g, b in zip(segment, restyled)])),
