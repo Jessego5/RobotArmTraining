@@ -388,6 +388,24 @@ OPENBLAS_NUM_THREADS=1 MUJOCO_GL=egl .venv-act/bin/python tools/dagger_rounds.py
 fresh scripted demonstrations instead of corrections. Pass `--reuse-round0
 outputs/dagger` so both arms share the round-0 policy.
 
+### Human corrections from the keyboard
+
+`tools/hil_keyboard.py` puts a person in the loop instead of the planner: ACT drives
+from its training renders, `h` takes over at the current pose with the teleop keys
+and starts recording, `e` saves the correction and hands control back to ACT in the
+same scene (`x` discards, `r` new scene). Corrections are recorded at exactly 30 Hz
+of simulated time in the native format. They need not finish the stack: correcting
+a grasp and handing back is a valid intervention, so do not filter them with the
+scripted replay audit's final-stack check.
+
+`dagger_rounds.py --mode human` trains each round and then stops, printing the
+checkpoint to use. Run the keyboard tool on a machine with a display, copy the
+corrections folder back as `WORK/corrections_<r+1>`, and rerun to continue.
+
+```bash
+python tools/hil_keyboard.py --checkpoint round_0_best --out corrections_1
+```
+
 ## Visual domain randomization
 
 `tools/export_scripted_dataset.py --domain-randomization` gives every episode its

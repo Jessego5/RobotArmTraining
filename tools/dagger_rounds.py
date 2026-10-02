@@ -58,8 +58,9 @@ def main():
     parser.add_argument('--collect-seed', type=int, default=20262001)
     parser.add_argument('--workers', type=int, default=6)
     parser.add_argument('--keep-datasets', action='store_true', help='keep every round\'s exported dataset')
-    parser.add_argument('--mode', choices=('corrections', 'demos'), default='corrections',
-                        help='demos: add fresh scripted demonstrations instead (control arm)')
+    parser.add_argument('--mode', choices=('corrections', 'demos', 'human'), default='corrections',
+                        help='demos: fresh scripted demonstrations instead (control arm); '
+                             'human: keyboard corrections from tools/hil_keyboard.py')
     parser.add_argument('--reuse-round0', type=Path, help="another arm's work directory to share round 0 with")
     args = parser.parse_args()
     work = args.work.resolve()
@@ -133,7 +134,14 @@ def main():
             break
         done = collected / 'status.json'
         if not (done.exists() and json.loads(done.read_text()).get('complete')):
-            shutil.rmtree(collected, ignore_errors=True)
+            if args.mode != 'human':
+                shutil.rmtree(collected, ignore_errors=True)
+            if args.mode == 'human':
+                print(f"\nRound {round_index} is trained. Collect corrections with this policy, e.g.\n"
+                      f"  python tools/hil_keyboard.py --checkpoint {checkpoint / 'best'} --out {collected}\n"
+                      f"(on a machine with a display; copy the checkpoint there and the folder back),\n"
+                      f"then rerun this command to continue.", flush=True)
+                return
             if args.mode == 'demos':
                 run([PY, 'tools/collect_scripted.py', '--output', collected,
                      '--episodes', args.interventions, '--workers', args.workers,

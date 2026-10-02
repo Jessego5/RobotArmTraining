@@ -52,6 +52,22 @@ where the data was collected, not to having more of it. Arms are matched on epis
 corrections start mid-task and are shorter, so the control arm receives more frames, which
 the results table reports (`added_frames`).
 
+## Human corrections
+
+`tools/hil_keyboard.py` replaces the planner with a person, as in the post. ACT drives at
+30 Hz from the same offscreen shoulder/wrist renders as training; `h` hands control to the
+teleop keys at the current pose and starts recording, `e` saves the segment and returns
+control to ACT in the same scene, so a person can intervene repeatedly within an episode.
+Both modes step the simulator in fixed 1/30 s ticks paced by the wall clock, so
+corrections are recorded at exactly 30 Hz regardless of display speed (verified: 33.33 ms
+mean step) and carry `control_mode: human_correction`, the policy checkpoint and contact-v2
+dynamics. A scripted-keypress run (take over, hold up, save, new scene, quit) saved a
+correction four times out of five; the first launch failed once and did not recur. Its
+correction exported together with a base demonstration.
+
+`dagger_rounds.py --mode human` pauses after each round's training with the checkpoint and
+destination to use, and resumes once the corrections folder is copied back.
+
 ## Changes to existing code
 
 `Planner.run()` was split into `pick`, `place` and `validate` so `finish()` can reuse

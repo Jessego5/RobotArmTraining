@@ -137,8 +137,10 @@ def load_policy(args):
     contract = json.loads(contract_path.read_text()) if contract_path.is_file() else {}
     if contract.get('action_representation', 'absolute') != 'absolute':
         raise SystemExit('DAgger collection supports absolute-action checkpoints only')
-    metadata = LeRobotDatasetMetadata('local/panthera_stack', root=args.dataset)
-    hz = resolve_control_hz(checkpoint, None, metadata.fps)
+    if getattr(args, 'dataset', None) is not None:
+        hz = resolve_control_hz(checkpoint, None, LeRobotDatasetMetadata('local/panthera_stack', root=args.dataset).fps)
+    else:  # e.g. a checkpoint copied to a laptop without its dataset
+        hz = float(contract.get('fps', 10))
     if hz != 30:
         raise SystemExit('The scripted expert records at 30 Hz; use a 30 Hz checkpoint')
     return policy, pre, post, device, contract, hz, dict(temporal_ensemble=temporal,
