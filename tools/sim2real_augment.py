@@ -69,6 +69,11 @@ class Settings:
     # Fixed per-camera inverse-depth ranges (m), so brightness does not pulse.
     depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.))
     batch: int = 8
+    # Pixels whose render did not change since the previous frame keep the
+    # previous restyle: a fixed camera's background then cannot shimmer.
+    carry_static: bool = True
+    static_threshold: int = 6       # max per-channel render change counted as still
+    static_margin: int = 5          # px grown around anything that moved
     prompts: tuple = field(default=PROMPTS)
 
 
@@ -140,6 +145,7 @@ class Restyler:
         size = (s.size, s.size)
         height, width = rgb.shape[1:3]
         out = np.empty_like(rgb)
+        grow = np.ones((2 * s.static_margin + 1,) * 2, np.uint8)
         for start in range(0, len(rgb), s.batch):
             chunk = slice(start, start + s.batch)
             frames = rgb[chunk]
@@ -161,7 +167,13 @@ class Restyler:
             for i, image in enumerate(images):
                 generated = cv2.resize(np.asarray(image), (width, height), interpolation=cv2.INTER_AREA)
                 alpha = cv2.GaussianBlur(keep[start + i].astype(np.float32), (3, 3), 0)[..., None]
-                out[start + i] = (alpha * frames[i] + (1 - alpha) * generated).astype(np.uint8)
+                frame = (alpha * frames[i] + (1 - alpha) * generated).astype(np.uint8)
+                index = start + i
+                if s.carry_static and index > 0:
+                    moved = np.abs(rgb[index].astype(np.int16) - rgb[index - 1]).max(axis=2) > s.static_threshold
+                    still = cv2.dilate(moved.astype(np.uint8), grow) == 0
+                    frame[still] = out[index - 1][still]
+                out[index] = frame
         return out
 
 
