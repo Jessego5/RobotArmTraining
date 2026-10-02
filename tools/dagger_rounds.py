@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -35,10 +36,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
 
-def run(command: list, log: Path) -> None:
+def run(command: list, log: Path, **env) -> None:
     print('+', ' '.join(map(str, command)), flush=True)
     with log.open('a') as stream:
-        subprocess.run(list(map(str, command)), cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(list(map(str, command)), cwd=ROOT, stdout=stream, stderr=subprocess.STDOUT,
+                       check=True, env={**os.environ, **{k: str(v) for k, v in env.items()}})
 
 
 def main():
@@ -106,8 +108,11 @@ def main():
             run([PY, 'tools/export_scripted_dataset.py', '--input', source,
                  '--rendered', work / f'{tag}_rendered', '--output', dataset, '--workers', args.workers], log)
         if not (checkpoint / 'best' / 'model.safetensors').exists():
+            # Training materializes an Arrow copy of the dataset; keep it per round
+            # so it is deleted with the round's dataset instead of accumulating.
             run([PY, 'train_act.py', '--dataset', dataset, '--output', checkpoint,
-                 '--steps', args.train_steps, *args.train_arg], log)
+                 '--steps', args.train_steps, *args.train_arg], log,
+                HF_DATASETS_CACHE=work / f'{tag}_arrow_cache')
         if not (evaluation / 'summary.json').exists():
             run([PY, 'tools/evaluate_act.py', '--checkpoint', checkpoint / 'best', '--dataset', dataset,
                  '--episodes', args.eval_episodes, '--seconds', args.eval_seconds,
@@ -121,6 +126,8 @@ def main():
         print(json.dumps(results[-1]), flush=True)
         if previous_dataset is not None and not args.keep_datasets and not previous_dataset.is_symlink():
             shutil.rmtree(previous_dataset, ignore_errors=True)
+            shutil.rmtree(previous_dataset.with_name(previous_dataset.name.replace('_dataset', '_arrow_cache')),
+                          ignore_errors=True)
         previous_dataset = dataset
         if round_index == args.rounds:
             break
