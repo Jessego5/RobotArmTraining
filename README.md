@@ -416,6 +416,26 @@ every range is centred on the default scene, and only the rendering model change
 physics, recordings and the renderer's code are untouched. Each episode's drawn
 appearance is saved as `appearance.json` beside its rendered trajectory.
 
+## Generative sim-to-real restyling
+
+`tools/sim2real_augment.py` repaints rendered frames to look like real camera
+images with Stable Diffusion 1.5 img2img, held to the simulator's geometry by depth
+and edge ControlNets and made four-step with LCM-LoRA. Cube pixels are pasted back
+exactly from the render via the simulator's segmentation, so cube positions and
+colours stay valid labels; each episode keeps one prompt and noise seed to limit
+flicker. Each restyle is measured (edge F1 against the render, and flicker relative
+to the render) in `restyle.json`.
+
+```bash
+python tools/sim2real_augment.py preview --episode data/scripted_stack/episode_0000 \
+  --frames 8 --output outputs/sim2real_preview.jpg
+python tools/export_scripted_dataset.py ... --restyle-fraction 0.3
+```
+
+The exporter loads one diffusion pipeline per worker (about 3–4 GB of GPU memory each
+in half precision), so lower `--workers` on smaller GPUs. Install `diffusers peft`
+with `transformers<5`, which LeRobot 0.4.4 requires.
+
 ## RL fine-tuning ACT for three-block stacking
 
 `train_act_rl.py` continues from the imitation checkpoint with conservative

@@ -40,7 +40,7 @@ def init_renderer(scene):
     cameras = [shoulder_camera(render_sim.model), wrist_camera(render_sim.model)]
 
 
-def render_job(source, dest, settings, randomize_seed=None):
+def render_job(source, dest, settings, randomize_seed=None, restyle_seed=None, restyle_settings=None):
     appearance = None
     if randomize_seed is not None:
         # Placeholder for sim-to-real: vary the look per episode (see the module).
@@ -56,6 +56,14 @@ def render_job(source, dest, settings, randomize_seed=None):
             randomizer.restore()
     if appearance is not None:
         (dest / 'appearance.json').write_text(json.dumps(dict(seed=randomize_seed, **appearance), indent=2) + '\n')
+    if restyle_seed is not None:
+        # Generative sim-to-real restyle; one pipeline per worker (see the module).
+        from tools.sim2real_augment import Restyler, restyle_rendered
+        global restyler
+        if 'restyler' not in globals():
+            from tools.sim2real_augment import Settings
+            restyler = Restyler(Settings(**(restyle_settings or {})))
+        restyle_rendered(dest, render_sim, renderers, cameras, restyler, restyle_seed)
     image_features = {k:v for k,v in features(256,256).items() if v['dtype']=='image'}
     image_buffer = {key:[str(dest/key.rsplit('.',1)[-1]/f'{j:05d}.jpg')
                          for j in range(count-1)] for key in image_features}
@@ -94,6 +102,14 @@ def main():
     parser.add_argument('--domain-randomization', action='store_true',
                         help='randomize table/floor/arm appearance, lighting and camera poses per episode')
     parser.add_argument('--appearance-seed', type=int, default=0)
+    parser.add_argument('--restyle-fraction', type=float, default=0.,
+                        help='share of episodes repainted by structure-locked diffusion (sim-to-real)')
+    parser.add_argument('--restyle-seed', type=int, default=0)
+    parser.add_argument('--restyle-batch', type=int, default=8, help='frames per diffusion call')
+    parser.add_argument('--restyle-size', type=int, default=512, help='diffusion resolution')
+    parser.add_argument('--restyle-steps', type=int, default=4)
+    parser.add_argument('--restyle-strength', type=float, default=.6)
+    parser.add_argument('--restyle-guidance', type=float, default=1.5, help='1.0 disables guidance (2x faster)')
     args = parser.parse_args()
     if args.output.exists() or args.rendered.exists():
         raise SystemExit('Output/rendered directory already exists; use fresh paths to avoid overwriting data.')
@@ -115,6 +131,8 @@ def main():
         raise SystemExit('Wait for collection to complete before exporting.')
     args.rendered.mkdir(parents=True)
     settings = render_signature(30, 256, 92)
+    restyle_settings = dict(batch=args.restyle_batch, size=args.restyle_size, steps=args.restyle_steps,
+                            strength=args.restyle_strength, guidance=args.restyle_guidance)
     dataset = LeRobotDataset.create(repo_id='local/panthera_scripted_stack', root=args.output,
         fps=30, robot_type='panthera_ht_sim', features=features(256,256), use_videos=False,
         image_writer_threads=0, metadata_buffer_size=20)
@@ -128,7 +146,10 @@ def main():
     def submit(i):
         source = episodes[i].parent
         seed = [args.appearance_seed, i] if args.domain_randomization else None
-        pending[i] = pool.submit(render_job, source, args.rendered/source.name, settings, seed)
+        restyle = (args.restyle_seed * 100003 + i
+                   if np.random.default_rng([args.restyle_seed, i]).random() < args.restyle_fraction else None)
+        pending[i] = pool.submit(render_job, source, args.rendered/source.name, settings, seed, restyle,
+                                 restyle_settings)
     for i in range(min(len(episodes), args.workers*2)):
         submit(i)
     try:
@@ -181,6 +202,12 @@ def main():
         scripted_exporter_sha256=file_hash(Path(__file__)),
         image_encoding='original renderer JPEG bytes', state_gripper='command',
         action_alignment='next_uniform_sample', sources=sources)
+    if args.restyle_fraction:
+        from dataclasses import asdict
+        from tools.sim2real_augment import Settings
+        provenance['restyle'] = dict(fraction=args.restyle_fraction, seed=args.restyle_seed,
+            settings={k: v for k, v in asdict(Settings(**restyle_settings)).items() if k != 'prompts'},
+            per_episode='restyle.json beside each restyled rendered trajectory')
     if args.domain_randomization:
         from dataclasses import asdict
         from tools.domain_randomization import Ranges
