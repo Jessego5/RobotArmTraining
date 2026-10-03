@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Package the exact local simulator and pi05 scripts for the remote notebook."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -37,7 +38,14 @@ def validate_runtime_archive(archive_path):
 
 
 def main():
-    provenance = json.loads((ROOT / "outputs/lerobot/panthera_scripted_stack_30hz/meta/provenance.json").read_text())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dataset", type=Path, default=ROOT / "outputs/lerobot/panthera_scripted_stack_30hz",
+                        help="exported dataset whose simulator hashes the runtime must match")
+    parser.add_argument("--episodes", type=Path, default=ROOT / "data/scripted_stack",
+                        help="native episodes the dataset was exported from (their seeds are excluded from evaluation)")
+    parser.add_argument("--output", type=Path, default=ROOT / "outputs/pi05_artifacts/assets/pi05_runtime.zip")
+    args = parser.parse_args()
+    provenance = json.loads((args.dataset / "meta/provenance.json").read_text())
     expected = next(iter(provenance["sources"].values()))["render_signature"]["implementation"]
     for name in ("sim/panthera_env.py", "sim/panthera/panthera.xml", "sim/panthera/scene.xml"):
         if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != expected[name]:
@@ -53,8 +61,8 @@ def main():
                 "cameras": {"shoulder": {"azimuth": 14., "elevation": -34., "distance": 1.2,
                                          "lookat": [.44, 0., .12]}, "wrist": "fixed wrist camera in panthera.xml"},
                 "training_seeds": [json.loads(p.read_text())["seed"]
-                                   for p in sorted((ROOT / "data/scripted_stack").glob("episode_*/meta.json"))]}
-    output = ROOT / "outputs/pi05_artifacts/assets/pi05_runtime.zip"
+                                   for p in sorted(args.episodes.glob("episode_*/meta.json"))]}
+    output = args.output
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in paths:

@@ -238,7 +238,8 @@ def main():
     root=Path(s['data'])
     assert (root/'COMPLETE').is_file(), 'Dataset publication is incomplete'
     info=json.loads((root/'meta/info.json').read_text())
-    assert (info['fps'],info['total_episodes'],info['total_frames']) == (30,1000,862766)
+    published=json.loads((root/'upload_manifest.json').read_text())
+    assert (info['fps'],info['total_episodes'],info['total_frames']) == (30,published['episodes'],published['frames'])
     for key in ('observation.state','action'):
         assert info['features'][key]['shape']==[7]
     for key in ('observation.images.shoulder','observation.images.wrist'):
