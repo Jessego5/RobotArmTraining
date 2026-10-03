@@ -123,6 +123,8 @@ def main():
     parser.add_argument('--private', action='store_true')
     parser.add_argument('--push', action='store_true', help='upload; without it, only validate and stage')
     args = parser.parse_args()
+    if args.repo_id.count('/') != 1 or not all(args.repo_id.split('/')):
+        parser.error(f'--repo-id must be USERNAME/NAME, got {args.repo_id!r}')
     source = args.source.resolve()
     stage = (args.stage or ROOT / 'outputs/hf' / args.repo_id.split('/')[-1]).resolve()
 
