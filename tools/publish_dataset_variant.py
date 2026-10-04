@@ -21,8 +21,10 @@ variant -- with what the notebook needs:
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -119,7 +121,8 @@ def main():
     parser.add_argument('--source', type=Path, required=True, help='complete LeRobot export')
     parser.add_argument('--episodes', type=Path, required=True, help='native episodes it was exported from')
     parser.add_argument('--repo-id', required=True, help='e.g. USER/panthera-restyled-30hz')
-    parser.add_argument('--stage', type=Path, help='default: outputs/hf/<repo name>')
+    parser.add_argument('--stage', type=Path,
+                        help='default: outputs/hf/<repo name>; on the same disk as --source to hard-link, not copy')
     parser.add_argument('--private', action='store_true')
     parser.add_argument('--push', action='store_true', help='upload; without it, only validate and stage')
     args = parser.parse_args()
@@ -137,7 +140,12 @@ def main():
         dest = stage / relative
         dest.parent.mkdir(parents=True, exist_ok=True)
         if not dest.exists():
-            os.link(source / relative, dest)
+            try:
+                os.link(source / relative, dest)
+            except OSError as error:
+                if error.errno != errno.EXDEV:
+                    raise
+                shutil.copy2(source / relative, dest)  # stage on another disk: copy instead
         elif not os.path.samefile(source / relative, dest):
             raise SystemExit(f'Refusing to replace unrelated staged file {dest}')
     provenance = json.loads((source / 'meta/provenance.json').read_text())
