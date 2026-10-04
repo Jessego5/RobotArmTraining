@@ -6,9 +6,10 @@ LCM-LoRA) repaints the simulator's shoulder and wrist renders to look like real
 camera images. Geometry is held by the simulator itself: the depth control is
 the exact rendered depth and the edge control is the outline of every object
 from the simulator's segmentation -- shapes, not the sim's textures -- so the
-table, arm and cubes keep their shape and place while surfaces are repainted. Cube pixels are then pasted
-back exactly from the render using the simulator's segmentation, so the cubes'
-positions and colours -- which the stacking order depends on -- are untouched.
+table, arm and cubes keep their shape and place while surfaces are repainted. Cube and
+gripper-finger pixels are then pasted back exactly from the render using the
+simulator's segmentation, so the cubes' positions and colours -- which the
+stacking order depends on -- and the jaws used to judge alignment are untouched.
 Each episode uses one prompt and one noise seed for every frame, which limits
 frame-to-frame flicker.
 
@@ -40,6 +41,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 CUBES = ('cube_red', 'cube_green', 'cube_blue')
+# The jaws are pasted back too: they are what grasp alignment is judged by, and
+# a fast restyle painted the wrist view's finger copper beside the red cube.
+KEPT_BODIES = ('L_finger', 'R_finger')
 # Every prompt names the robot's real finish: without it, a wooden table bleeds into the arm.
 ARM = 'a white and grey aluminium robot arm with a black metal parallel gripper'
 PROMPTS = (
@@ -190,8 +194,8 @@ def background_geom_ids(model) -> list[int]:
             if model.geom_bodyid[i] == table or mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) == 'floor']
 
 
-def scene_maps(sim, renderer, camera, cube_geoms) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Depth (m), per-pixel object ids (-1 for none) and a cube mask for the current state."""
+def scene_maps(sim, renderer, camera, kept_geoms) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Depth (m), per-pixel object ids (-1 for none) and the copied-back mask for the current state."""
     renderer.update_scene(sim.data, camera)
     renderer.enable_depth_rendering()
     depth = renderer.render().copy()
@@ -202,7 +206,7 @@ def scene_maps(sim, renderer, camera, cube_geoms) -> tuple[np.ndarray, np.ndarra
     import mujoco
     is_geom = segmentation[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM)
     ids = np.where(is_geom, segmentation[..., 0], -1)
-    return depth, ids, is_geom & np.isin(segmentation[..., 0], cube_geoms)
+    return depth, ids, is_geom & np.isin(segmentation[..., 0], kept_geoms)
 
 
 def set_frame(sim, arrays: dict, i: int) -> None:
@@ -217,17 +221,20 @@ def set_frame(sim, arrays: dict, i: int) -> None:
     mujoco.mj_forward(sim.model, sim.data)
 
 
-def cube_geom_ids(model) -> list[int]:
+def kept_geom_ids(model) -> list[int]:
+    """Geoms copied back unchanged from the render: the cubes and the gripper fingers."""
     import mujoco
-    return [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in CUBES
-            if mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) >= 0]
+    cubes = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name) for name in CUBES]
+    bodies = {mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in KEPT_BODIES}
+    fingers = [i for i in range(model.ngeom) if model.geom_bodyid[i] in bodies]
+    return [i for i in cubes if i >= 0] + fingers
 
 
 def restyle_rendered(dest: Path, sim, renderers, cameras, restyler: Restyler, seed: int) -> dict:
     """Restyle a rendered episode directory's JPEGs in place; returns its measurements."""
     with np.load(dest / 'trajectory.npz') as data:
         arrays = {key: data[key] for key in ('q', 'finger_q', 'ctrl', 'obj_pos', 'obj_quat')}
-    cubes = cube_geom_ids(sim.model)
+    cubes = kept_geom_ids(sim.model)
     report = dict(seed=seed, prompt=restyler.settings.prompts[seed % len(restyler.settings.prompts)])
     for name, renderer, camera in zip(('shoulder', 'wrist'), renderers, cameras):
         paths = sorted((dest / name).glob('*.jpg'))
@@ -275,7 +282,7 @@ def preview(args):
         arrays['finger_q'] = interpolate(t, fingers, grid)
     renderers = [mujoco.Renderer(sim.model, 256, 256) for _ in range(2)]
     cameras = [shoulder_camera(sim.model), wrist_camera(sim.model)]
-    cubes = cube_geom_ids(sim.model)
+    cubes = kept_geom_ids(sim.model)
     restyler = Restyler(Settings(strength=args.strength, steps=args.steps, batch=args.batch,
                                  size=args.size, guidance=args.guidance))
     rows, report = [], {}

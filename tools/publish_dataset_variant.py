@@ -71,8 +71,8 @@ def card(info: dict, provenance: dict, repo_id: str) -> str:
             f"- **Generative restyle:** {restyle['fraction']:.0%} of episodes (seeded per episode) repainted by "
             f"Stable Diffusion 1.5 img2img with depth and object-outline ControlNets and LCM-LoRA "
             f"({s['steps']} steps, strength {s['strength']}, guidance {s['guidance']}, {s['size']} px). Geometry "
-            f"comes from the simulator's depth and segmentation; cube pixels are pasted back exactly, so cube "
-            f"positions and colours are unchanged. Per-episode prompt, outline recall and flicker are recorded "
+            f"comes from the simulator's depth and segmentation; cube and gripper-finger pixels are pasted back "
+            f"exactly, so cube positions and colours and the jaws are unchanged. Per-episode prompt, outline recall and flicker are recorded "
             f"beside the rendered trajectories as `restyle.json`.")
     if randomized:
         variant.append('- **Domain randomization:** per-episode table, floor and arm appearance, lighting and '
