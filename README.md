@@ -436,6 +436,29 @@ The exporter loads one diffusion pipeline per worker (about 3–4 GB of GPU memo
 in half precision), so lower `--workers` on smaller GPUs. Install `diffusers peft`
 with `transformers<5`, which LeRobot 0.4.4 requires.
 
+## Real two-arm gear/carrier/pin demonstrations
+
+`sim/bimanual.py` builds a two-arm scene matching the real setup, with base
+spacing estimated from the recorded tool poses and the camera placement
+guessed. `tools/replay_real_bimanual.py` replays a full-rate real episode
+in it, next to the real camera frames.
+
+`tools/train_real_act.py` trains ACT on the 227 real demonstrations
+(`FoxNerdSaysMoo/panthera-gear-carrier-pin-real-20hz`) and, with no robot to
+roll out on, judges it on held-out episodes. It reports the open-loop action
+error against a "hold the current pose" baseline. It can also write videos of
+the real overhead frame beside the sim posed at the recorded and predicted
+poses one chunk ahead.
+
+```bash
+python tools/train_real_act.py fetch --root data/real_gear          # ~5.3 GiB
+python tools/train_real_act.py train --root data/real_gear --output outputs/real_act
+python tools/train_real_act.py evaluate --root data/real_gear \
+  --checkpoint outputs/real_act/best --videos --episodes 5
+```
+
+Rerunning `train` resumes from `outputs/real_act/last`.
+
 ## RL fine-tuning ACT for three-block stacking
 
 `train_act_rl.py` continues from the imitation checkpoint with conservative
