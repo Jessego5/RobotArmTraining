@@ -78,7 +78,7 @@ class Settings:
     depth_scale: float = .9
     canny_scale: float = .5
     # Fixed per-camera inverse-depth ranges (m), so brightness does not pulse.
-    depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.))
+    depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.), ('overhead', .3, 1.5))
     batch: int = 8
     # Background pixels (sky, floor, table) whose render did not change since
     # the previous frame keep the previous restyle, so a fixed camera's
@@ -91,6 +91,7 @@ class Settings:
     # Optional style reference: a real camera frame steering the look through an
     # IP-Adapter. Ignored when the pipeline was built without one.
     ip_scale: float = 0.
+    negative: str = NEGATIVE
 
 
 REAL_DATASET = 'FoxNerdSaysMoo/panthera-gear-carrier-pin-real-20hz'
@@ -194,7 +195,7 @@ class Restyler:
                                      for g in segment[chunk]])
             # The same noise for every frame of the episode limits flicker.
             generators = [torch.Generator('cpu').manual_seed(seed) for _ in range(count)]
-            images = self.pipe(prompt=[prompt] * count, negative_prompt=[NEGATIVE] * count,
+            images = self.pipe(prompt=[prompt] * count, negative_prompt=[s.negative] * count,
                                image=init, control_image=[depth_control, edge_control],
                                strength=s.strength, num_inference_steps=s.steps,
                                guidance_scale=s.guidance,

@@ -78,42 +78,83 @@
 
   <worldbody>
     <geom name="floor" size="0 0 0.05" pos="0 0 -0.75" type="plane" rgba="0.35 0.35 0.38 1"/>
-    <camera name="overhead" quat="0.623438 0.333654 -0.333654 -0.623438" pos="-0.45 0 0.6" fovy="85"/>
-    <light pos="0.3 0 2" diffuse="0.45 0.45 0.45" type="directional"/>
-    <light pos="0.3 0.5 1.5" dir="0 -0.287348 -0.957826" diffuse="0.15 0.15 0.15"/>
-    <body name="table" pos="0.3 0 -0.02">
-      <geom name="table_top" size="0.5 0.7 0.02" type="box" friction="0.4 0.02 0.0005" rgba="0.82 0.66 0.45 1"/>
+    <camera name="overhead" quat="0.60804 0.360953 -0.360953 -0.60804" pos="-0.8 0 1" fovy="35"/>
+    <light pos="0.45 0 2" diffuse="0.45 0.45 0.45" type="directional"/>
+    <light pos="0.45 0.5 1.5" dir="0 -0.287348 -0.957826" diffuse="0.15 0.15 0.15"/>
+    <body name="table" pos="0.45 0 -0.02">
+      <geom name="table_top" size="0.6 0.7 0.02" type="box" friction="0.4 0.02 0.0005" rgba="0.8 0.62 0.4 1"/>
+    </body>
+    <body name="carrier" pos="0.32 -0.12 0.016">
+      <joint name="carrier" type="free"/>
+      <geom name="carrier" size="0.022 0.022 0.003" pos="0 0 -0.013" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="2700"/>
+      <geom name="carrier_top_x+1" size="0.00875 0.022 0.013" pos="0.01325 0 0.003" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="2700"/>
+      <geom name="carrier_top_y+1" size="0.0045 0.00875 0.013" pos="0 0.01325 0.003" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="2700"/>
+      <geom name="carrier_top_x-1" size="0.00875 0.022 0.013" pos="-0.01325 0 0.003" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="2700"/>
+      <geom name="carrier_top_y-1" size="0.0045 0.00875 0.013" pos="0 -0.01325 0.003" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="2700"/>
+      <site name="carrier_hole" size="0.002" pos="0 0 0.016" group="4"/>
+    </body>
+    <body name="gear" pos="0.3 0.12 0.004">
+      <joint name="gear" type="free"/>
+      <geom name="gear_x+1" size="0.003 0.011 0.004" pos="0.008 0 0" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.12 0.12 0.13 1" density="1200"/>
+      <geom name="gear_y+1" size="0.005 0.003 0.004" pos="0 0.008 0" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.12 0.12 0.13 1" density="1200"/>
+      <geom name="gear_x-1" size="0.003 0.011 0.004" pos="-0.008 0 0" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.12 0.12 0.13 1" density="1200"/>
+      <geom name="gear_y-1" size="0.005 0.003 0.004" pos="0 -0.008 0" type="box" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.12 0.12 0.13 1" density="1200"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0.01375 0 0" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0.0119078 0.006875 0" quat="0.965926 0 0 0.258819" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0.006875 0.0119078 0" quat="0.866025 0 0 0.5" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0 0.01375 0" quat="0.707107 0 0 0.707107" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="-0.006875 0.0119078 0" quat="0.5 0 0 0.866025" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="-0.0119078 0.006875 0" quat="0.258819 0 0 0.965926" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="-0.01375 0 0" quat="0 0 0 1" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="-0.0119078 -0.006875 0" quat="-0.258819 0 0 0.965926" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="-0.006875 -0.0119078 0" quat="-0.5 0 0 0.866025" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0 -0.01375 0" quat="-0.707107 0 0 0.707107" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0.006875 -0.0119078 0" quat="-0.866025 0 0 0.5" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <geom size="0.0022 0.0015 0.0036" pos="0.0119078 -0.006875 0" quat="-0.965926 0 0 0.258819" type="box" contype="0" conaffinity="0" group="2" rgba="0.12 0.12 0.13 1"/>
+      <site name="gear_bore" size="0.002" pos="0 0 0.004" group="4"/>
+    </body>
+    <body name="pin_stand" pos="0.24 0.2 0.006">
+      <geom name="pin_stand_floor" size="0.012 0.012 0.001" pos="0 0 -0.005" type="box" rgba="0.12 0.12 0.13 1"/>
+      <geom name="pin_stand_x+1" size="0.00375 0.012 0.005" pos="0.00825 0 0.001" type="box" rgba="0.12 0.12 0.13 1"/>
+      <geom name="pin_stand_y+1" size="0.0045 0.00375 0.005" pos="0 0.00825 0.001" type="box" rgba="0.12 0.12 0.13 1"/>
+      <geom name="pin_stand_x-1" size="0.00375 0.012 0.005" pos="-0.00825 0 0.001" type="box" rgba="0.12 0.12 0.13 1"/>
+      <geom name="pin_stand_y-1" size="0.0045 0.00375 0.005" pos="0 -0.00825 0.001" type="box" rgba="0.12 0.12 0.13 1"/>
+    </body>
+    <body name="pin" pos="0.24 0.2 0.0175">
+      <joint name="pin" type="free"/>
+      <geom name="pin" size="0.0025 0.013" type="capsule" condim="6" friction="0.8 0.08 0.004" solref="0.005" solimp="0.98 0.99" rgba="0.72 0.73 0.75 1" density="7800"/>
+      <site name="pin_tip" size="0.002" pos="0 0 -0.0155" group="4"/>
     </body>
     <frame pos="0 0.2875 0">
       <body name="left/link1" pos="0 0 0.0584">
         <inertial pos="0.00278873 -0.00094387 0.0249184" quat="0.692661 0.650108 0.225614 -0.216051" mass="0.281016" diaginertia="0.000421358 0.000343661 0.000213101"/>
         <joint name="left/joint1" range="-2.4 2.4" actuatorfrcrange="-21 21" armature="0.05" damping="0.2" frictionloss="0.1"/>
-        <geom class="left/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link1"/>
+        <geom class="left/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="left/link1"/>
         <geom class="left/collision" quat="1 0 0 0" mesh="left/link1_col"/>
         <body name="left/link2" pos="0.018199 0 0.053">
           <inertial pos="-0.129362 -0.00213339 7.183e-05" quat="0.00988446 0.706238 0.00888299 0.70785" mass="1.51651" diaginertia="0.0227212 0.0226105 0.00044695"/>
           <joint name="left/joint2" range="0 3.2" actuatorfrcrange="-36 36" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 1 0"/>
-          <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link2"/>
+          <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="left/link2"/>
           <geom class="left/collision" pos="0 0 0" quat="1 0 0 0" mesh="left/link2_col"/>
           <body name="left/link3" pos="-0.26 0 0">
             <inertial pos="0.163431 -0.00164646 0.0533743" quat="-0.0903299 0.649643 -0.0759146 0.751027" mass="0.669178" diaginertia="0.00543522 0.00538336 0.00051072"/>
             <joint name="left/joint3" range="0 4" actuatorfrcrange="-36 36" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 -1 0"/>
-            <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link3"/>
+            <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="left/link3"/>
             <geom class="left/collision" pos="0 0 0" quat="1 0 0 0" mesh="left/link3_col"/>
             <body name="left/link4" pos="0.23 0 0.06">
               <inertial pos="0.0524013 -0.00055249 0.0409418" quat="-0.0119308 0.442275 0.0207973 0.896559" mass="0.307805" diaginertia="0.000483913 0.000395159 0.000124278"/>
               <joint name="left/joint4" range="-1.6 1.6" actuatorfrcrange="-21 21" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 -1 0"/>
-              <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link4"/>
+              <geom class="left/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="left/link4"/>
               <geom class="left/collision" pos="0 0 0" quat="1 0 0 0" mesh="left/link4_col"/>
               <body name="left/link5" pos="0.07 0 0.036319">
                 <inertial pos="0.00303007 8.509e-05 -0.0362408" quat="0.705992 0.0034971 0.00378767 0.708201" mass="0.237111" diaginertia="5.77301e-05 4.81515e-05 3.35885e-05"/>
                 <joint name="left/joint5" range="-1.7 1.7" actuatorfrcrange="-10 10" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 0 -1"/>
-                <geom class="left/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link5"/>
+                <geom class="left/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="left/link5"/>
                 <geom class="left/collision" quat="1 0 0 0" mesh="left/link5_col"/>
                 <body name="left/link6" pos="0.02345 0 -0.039">
                   <inertial pos="0.0365806 -4.4236e-05 -3.47544e-05" quat="0.512706 0.486973 -0.500963 0.499025" mass="0.106038" diaginertia="0.00177399 0.00116496 0.000713576"/>
                   <joint name="left/joint6" range="-2.5 2.5" actuatorfrcrange="-10 10" armature="0.05" damping="0.2" frictionloss="0.1" axis="1 0 0"/>
-                  <geom class="left/visual" rgba="0.752941 0.752941 0.752941 0.12" mesh="left/link6"/>
+                  <geom class="left/visual" rgba="0.752941 0.752941 0.752941 1" mesh="left/link6"/>
                   <geom class="left/collision" mesh="left/link6_col"/>
                   <geom class="left/visual" pos="0.165 0 0" quat="1 0 0 0" rgba="0.866667 0.909804 1 1" mesh="left/gripper_center"/>
                   <geom class="left/collision" pos="0.165 0 0" quat="1 0 0 0" mesh="left/gripper_center_col"/>
@@ -148,32 +189,32 @@
       <body name="right/link1" pos="0 0 0.0584">
         <inertial pos="0.00278873 -0.00094387 0.0249184" quat="0.692661 0.650108 0.225614 -0.216051" mass="0.281016" diaginertia="0.000421358 0.000343661 0.000213101"/>
         <joint name="right/joint1" range="-2.4 2.4" actuatorfrcrange="-21 21" armature="0.05" damping="0.2" frictionloss="0.1"/>
-        <geom class="right/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link1"/>
+        <geom class="right/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="right/link1"/>
         <geom class="right/collision" quat="1 0 0 0" mesh="right/link1_col"/>
         <body name="right/link2" pos="0.018199 0 0.053">
           <inertial pos="-0.129362 -0.00213339 7.183e-05" quat="0.00988446 0.706238 0.00888299 0.70785" mass="1.51651" diaginertia="0.0227212 0.0226105 0.00044695"/>
           <joint name="right/joint2" range="0 3.2" actuatorfrcrange="-36 36" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 1 0"/>
-          <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link2"/>
+          <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="right/link2"/>
           <geom class="right/collision" pos="0 0 0" quat="1 0 0 0" mesh="right/link2_col"/>
           <body name="right/link3" pos="-0.26 0 0">
             <inertial pos="0.163431 -0.00164646 0.0533743" quat="-0.0903299 0.649643 -0.0759146 0.751027" mass="0.669178" diaginertia="0.00543522 0.00538336 0.00051072"/>
             <joint name="right/joint3" range="0 4" actuatorfrcrange="-36 36" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 -1 0"/>
-            <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link3"/>
+            <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="right/link3"/>
             <geom class="right/collision" pos="0 0 0" quat="1 0 0 0" mesh="right/link3_col"/>
             <body name="right/link4" pos="0.23 0 0.06">
               <inertial pos="0.0524013 -0.00055249 0.0409418" quat="-0.0119308 0.442275 0.0207973 0.896559" mass="0.307805" diaginertia="0.000483913 0.000395159 0.000124278"/>
               <joint name="right/joint4" range="-1.6 1.6" actuatorfrcrange="-21 21" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 -1 0"/>
-              <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link4"/>
+              <geom class="right/visual" pos="0 0 0" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="right/link4"/>
               <geom class="right/collision" pos="0 0 0" quat="1 0 0 0" mesh="right/link4_col"/>
               <body name="right/link5" pos="0.07 0 0.036319">
                 <inertial pos="0.00303007 8.509e-05 -0.0362408" quat="0.705992 0.0034971 0.00378767 0.708201" mass="0.237111" diaginertia="5.77301e-05 4.81515e-05 3.35885e-05"/>
                 <joint name="right/joint5" range="-1.7 1.7" actuatorfrcrange="-10 10" armature="0.05" damping="0.2" frictionloss="0.1" axis="0 0 -1"/>
-                <geom class="right/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link5"/>
+                <geom class="right/visual" quat="1 0 0 0" rgba="0.752941 0.752941 0.752941 1" mesh="right/link5"/>
                 <geom class="right/collision" quat="1 0 0 0" mesh="right/link5_col"/>
                 <body name="right/link6" pos="0.02345 0 -0.039">
                   <inertial pos="0.0365806 -4.4236e-05 -3.47544e-05" quat="0.512706 0.486973 -0.500963 0.499025" mass="0.106038" diaginertia="0.00177399 0.00116496 0.000713576"/>
                   <joint name="right/joint6" range="-2.5 2.5" actuatorfrcrange="-10 10" armature="0.05" damping="0.2" frictionloss="0.1" axis="1 0 0"/>
-                  <geom class="right/visual" rgba="0.752941 0.752941 0.752941 0.12" mesh="right/link6"/>
+                  <geom class="right/visual" rgba="0.752941 0.752941 0.752941 1" mesh="right/link6"/>
                   <geom class="right/collision" mesh="right/link6_col"/>
                   <geom class="right/visual" pos="0.165 0 0" quat="1 0 0 0" rgba="0.866667 0.909804 1 1" mesh="right/gripper_center"/>
                   <geom class="right/collision" pos="0.165 0 0" quat="1 0 0 0" mesh="right/gripper_center_col"/>
@@ -240,7 +281,7 @@
   </actuator>
 
   <keyframe>
-    <key name="left/home" qpos="0 1.2 1.4 0 0 0 0.04 -0.04 0 0 0 0 0 0 0 0" ctrl="0 1.2 1.4 0 0 0 0.04 0 0 0 0 0 0 0"/>
-    <key name="right/home" qpos="0 0 0 0 0 0 0 0 0 1.2 1.4 0 0 0 0.04 -0.04" ctrl="0 0 0 0 0 0 0 0 1.2 1.4 0 0 0 0.04"/>
+    <key name="left/home" qpos="0.32 -0.12 0.016 1 0 0 0 0.3 0.12 0.004 1 0 0 0 0.24 0.2 0.0175 1 0 0 0 0 1.2 1.4 0 0 0 0.04 -0.04 0 0 0 0 0 0 0 0" ctrl="0 1.2 1.4 0 0 0 0.04 0 0 0 0 0 0 0"/>
+    <key name="right/home" qpos="0.32 -0.12 0.016 1 0 0 0 0.3 0.12 0.004 1 0 0 0 0.24 0.2 0.0175 1 0 0 0 0 0 0 0 0 0 0 0 0 1.2 1.4 0 0 0 0.04 -0.04" ctrl="0 0 0 0 0 0 0 0 1.2 1.4 0 0 0 0.04"/>
   </keyframe>
 </mujoco>

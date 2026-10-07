@@ -440,8 +440,36 @@ with `transformers<5`, which LeRobot 0.4.4 requires.
 
 `sim/bimanual.py` builds a two-arm scene matching the real setup, with base
 spacing estimated from the recorded tool poses and the camera placement
-guessed. `tools/replay_real_bimanual.py` replays a full-rate real episode
-in it, next to the real camera frames.
+guessed. It has stand-in parts until CAD arrives: a carrier with a pin hole, a
+small gear and a pin in a stand. `tools/replay_real_bimanual.py` replays a
+full-rate real episode in it, next to the real camera frames.
+
+### Simulated two-arm demonstrations
+
+`tools/collect_bimanual.py` scripts the real task. The right hand holds the
+carrier from the start, as in the real episodes. The left places the gear over
+the hole, then takes the pin from its stand and pushes it through the gear into
+the carrier. Approach angles and starting postures come from the real
+recordings. Every episode is physics-checked: gear within 3 mm of the hole, pin
+at least 8 mm into the carrier, carrier still clamped.
+
+`tools/export_bimanual_dataset.py` writes them as a LeRobot dataset with the
+real dataset's features, so the two can be mixed:
+
+- 20 Hz.
+- 14-D state in radians.
+- `action` is the next state.
+- velocity and effort.
+- `overhead` is cropped like the real webcam, from either real camera setup.
+- `wrist_port2` (left) and `wrist_port3` (right) are fisheye.
+
+`--restyle-fraction` repaints that share of episodes with the diffusion
+restyle, steered by real frames from the same camera through an IP-Adapter.
+Part and finger pixels are copied back from the render.
+
+```bash
+bash tools/pod_bimanual.sh            # collect, preview, export (see the script for settings)
+```
 
 `tools/train_real_act.py` trains ACT on the 227 real demonstrations
 (`FoxNerdSaysMoo/panthera-gear-carrier-pin-real-20hz`) and, with no robot to
