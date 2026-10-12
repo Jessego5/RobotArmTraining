@@ -463,9 +463,20 @@ real dataset's features, so the two can be mixed:
 - `overhead` is cropped like the real webcam, from either real camera setup.
 - `wrist_port2` (left) and `wrist_port3` (right) are fisheye.
 
+Lighting starts from the real lab: two ceiling fixtures placed from the real
+frames' glare spots, and a varnished table. `--copies N` renders each demo N
+times. Copy 0 uses the estimated lab. The others vary, per episode:
+
+- light positions, brightness, warmth and shadow softness;
+- table tone and gloss;
+- drifting operator shadows (`--operator-shadows` share);
+- webcam exposure, white balance, noise and blur.
+
 `--restyle-fraction` repaints that share of episodes with the diffusion
 restyle, steered by real frames from the same camera through an IP-Adapter.
-Part and finger pixels are copied back from the render.
+It restyles an unlit render and then multiplies the sim's shadows and glare
+back in, so they stay where the lights put them. Part and finger pixels are
+copied back from the render.
 
 ```bash
 bash tools/pod_bimanual.sh            # collect, preview, export (see the script for settings)

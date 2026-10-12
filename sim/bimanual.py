@@ -48,6 +48,15 @@ OVERHEAD_SETUPS = {
     'after_oct2': dict(pos=(-.80, 0., 1.00), target=(.85, 0., .10), fovy=35.),
 }
 OVERHEAD = OVERHEAD_SETUPS['after_oct2']
+# Lights, estimated from the real overhead frames: two steady glare spots on the
+# varnished table, reflected back through the estimated camera to a ceiling ~1.9 m
+# above the table, put two fixtures about 3 m ahead of the bases. A dimmer fixture
+# over the arms stands in for the rest of the ceiling.
+LIGHTS = {
+    'ceiling_left': dict(pos=np.array([3.0, .65, 1.9]), diffuse=(.55, .55, .52), specular=(.5, .5, .5)),
+    'ceiling_right': dict(pos=np.array([3.0, -.30, 1.9]), diffuse=(.55, .55, .52), specular=(.5, .5, .5)),
+    'ceiling_over': dict(pos=np.array([.20, .10, 1.9]), diffuse=(.25, .25, .24), specular=(.1, .1, .1)),
+}
 OVERHEAD_CROP = (176, 224, 432, 480)
 # Parts (m). Clearances are generous until real tolerances are known.
 CARRIER_HALF = .022, .016       # square half-width, half-height
@@ -142,20 +151,27 @@ def build_spec(overhead: dict = OVERHEAD, parts: bool = True) -> mujoco.MjSpec:
     for key in ('timestep', 'integrator', 'cone', 'impratio'):
         setattr(spec.option, key, getattr(arm_template.option, key))
     spec.visual.global_.offwidth, spec.visual.global_.offheight = 1920, 1080
-    spec.visual.headlight.diffuse = [.25, .25, .25]
-    spec.visual.headlight.ambient = [.15, .15, .15]
+    spec.visual.headlight.diffuse = [.12, .12, .12]
+    spec.visual.headlight.ambient = [.22, .22, .22]
+    spec.visual.headlight.specular = [0, 0, 0]
+    spec.visual.quality.shadowsize = 4096
 
     world = spec.worldbody
-    world.add_light(pos=[TABLE_CENTRE_X, 0, 2.], dir=[0, 0, -1], diffuse=[.45, .45, .45],
-                    type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL)
-    world.add_light(pos=[TABLE_CENTRE_X, .5, 1.5], dir=[0, -.3, -1], diffuse=[.15, .15, .15])
+    for name, light in LIGHTS.items():
+        target = np.array([.35, 0., 0.])
+        direction = target - light['pos']
+        world.add_light(name=name, pos=list(light['pos']), dir=list(direction / np.linalg.norm(direction)),
+                        type=mujoco.mjtLightType.mjLIGHT_SPOT, cutoff=80., castshadow=True,
+                        diffuse=list(light['diffuse']), specular=list(light['specular']), bulbradius=.15)
     world.add_geom(name='floor', type=mujoco.mjtGeom.mjGEOM_PLANE, size=[0, 0, .05],
                    pos=[0, 0, -.75], rgba=[.35, .35, .38, 1])
     table = world.add_body(name='table', pos=[TABLE_CENTRE_X, 0, -.02])
     # Light maple butcher block, like the real table.
+    # Varnished, so the ceiling lights leave glare spots as in the real frames.
+    spec.add_material(name='table', rgba=[.80, .62, .40, 1], specular=.6, shininess=.9)
     table.add_geom(name='table_top', type=mujoco.mjtGeom.mjGEOM_BOX,
-                   size=[TABLE_SIZE[0] / 2, TABLE_SIZE[1] / 2, .02],
-                   rgba=[.80, .62, .40, 1], friction=[.4, .02, .0005])
+                   size=[TABLE_SIZE[0] / 2, TABLE_SIZE[1] / 2, .02], material='table',
+                   friction=[.4, .02, .0005])
     world.add_camera(name='overhead', pos=list(overhead['pos']), fovy=overhead['fovy'],
                      quat=_look_at(overhead['pos'], overhead['target']))
     if parts:

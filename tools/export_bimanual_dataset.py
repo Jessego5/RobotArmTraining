@@ -13,9 +13,23 @@ and three 256x256 cameras:
 - `wrist_port2` (left) and `wrist_port3` (right): wide renders warped to an
   equidistant fisheye with dark corners, like the real wrist lenses.
 
-`--restyle-fraction` repaints that share of episodes with the structure-locked
-diffusion restyle (tools/sim2real_augment.py), steered toward the real look by
-real frames from the same camera through an IP-Adapter; part and finger pixels
+Lighting starts from the real lab: two ceiling fixtures whose positions were
+estimated from the real glare spots (sim/bimanual.py), a dimmer one over the
+arms, and a varnished table. `--copies N` renders every demonstration N times:
+copy 0 as estimated, the others with augmented looks, each fixed per episode:
+
+- lighting: fixture positions, brightness, warmth, shadow softness, fixtures
+  switched off, ambient level, table tone and gloss;
+- operator shadows (`--operator-shadows` share): soft dark shapes drifting over
+  the table and parts, as the hand-guiding operator's arms cast in real frames;
+- webcam response: exposure, white balance, gamma, sensor noise, slight blur.
+
+`--restyle-fraction` repaints that share of rendered episodes with the
+structure-locked diffusion restyle (tools/sim2real_augment.py), steered toward
+the real look by real frames from the same camera through an IP-Adapter. The
+restyle starts from a render without shadows or highlights, and the sim's own
+shadows and glare are multiplied back in afterwards (lit render / unlit render),
+so they fall exactly where the scene's lights put them. Part and finger pixels
 are pasted back from the render. Check the look first with `preview`:
 
     python tools/export_bimanual_dataset.py preview --episodes data/bimanual --output outputs/bimanual_preview.jpg
@@ -41,7 +55,7 @@ import cv2
 import mujoco
 import numpy as np
 
-from sim.bimanual import ARMS, OVERHEAD_CROP, OVERHEAD_SETUPS, PARTS, build_model
+from sim.bimanual import ARMS, LIGHTS, OVERHEAD_CROP, OVERHEAD_SETUPS, PARTS, build_model
 
 FPS = 20
 CAMERAS = {'overhead': 'overhead', 'wrist_port2': 'left/wrist', 'wrist_port3': 'right/wrist'}
@@ -85,7 +99,7 @@ def fisheye_maps(source: int, out: int):
 class Views:
     """The three real camera views of a model, with matching depth and segmentation."""
 
-    def __init__(self, overhead_setup: str, jitter_seed: int | None = None):
+    def __init__(self, overhead_setup: str, jitter_seed: int | None = None, appearance: dict | None = None):
         self.model = build_model(overhead=OVERHEAD_SETUPS[overhead_setup])
         self.data = mujoco.MjData(self.model)
         m = self.model
@@ -97,6 +111,9 @@ class Views:
         self.cameras = {name: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, sim) for name, sim in CAMERAS.items()}
         for name in ('wrist_port2', 'wrist_port3'):
             m.cam_fovy[self.cameras[name]] = WRIST_FOV
+        if appearance:
+            apply_appearance(m, appearance)
+        self.light_specular = m.light_specular.copy()
         self.overhead = mujoco.Renderer(m, 480, 640)
         self.wrist = mujoco.Renderer(m, 960, 960)
         self.maps = fisheye_maps(960, 480)
@@ -122,10 +139,16 @@ class Views:
         warped[~inside] = -1 if nearest else 0
         return cv2.resize(warped, (256, 256), interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_AREA)
 
-    def render(self, name, maps=False):
+    def render(self, name, maps=False, unlit=False):
+        """RGB (and depth/ids); `unlit` drops shadows and specular highlights."""
         renderer = self.overhead if name == 'overhead' else self.wrist
+        if unlit:
+            self.model.light_specular[:] = 0
         renderer.update_scene(self.data, self.cameras[name], self.options)
+        if unlit:
+            renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
         rgb = self._shape(name, renderer.render())
+        self.model.light_specular[:] = self.light_specular
         if not maps:
             return rgb
         renderer.enable_depth_rendering()
@@ -138,6 +161,90 @@ class Views:
         ids = self._shape(name, ids, nearest=True)
         depth = np.where(ids < 0, 5., depth).astype(np.float32)
         return rgb, depth, ids
+
+
+def sample_appearance(rng) -> dict:
+    """One episode's lighting and table look around the estimated real lab."""
+    lights = {}
+    warmth = rng.uniform(-1, 1)  # one room: cool fluorescent .. warm bulbs
+    off = rng.choice(['ceiling_left', 'ceiling_right', None, None, None, None])  # a front fixture out, sometimes
+    for name, light in LIGHTS.items():
+        tint = np.array([1 + .08 * warmth, 1., 1 - .10 * warmth]) * rng.uniform(.97, 1.03, 3)
+        lights[name] = dict(
+            offset=(rng.normal(0, [.5, .4, .15])).tolist(),
+            scale=float(rng.uniform(.75, 1.3)), tint=tint.tolist(),
+            softness=float(rng.uniform(.02, .45)),
+            on=bool(name != off and (name != 'ceiling_over' or rng.random() < .6)))
+    return dict(lights=lights, ambient=float(rng.uniform(.15, .35)),
+                table_tone=float(rng.uniform(.85, 1.12)), table_hue=float(rng.uniform(-.04, .04)),
+                table_gloss=float(rng.uniform(.2, .85)))
+
+
+def apply_appearance(model, look: dict) -> None:
+    for name, light in look['lights'].items():
+        i = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_LIGHT, name)
+        model.light_pos[i] += light['offset']
+        target = np.array([.35, 0., 0.]) - model.light_pos[i]
+        model.light_dir[i] = target / np.linalg.norm(target)
+        model.light_diffuse[i] *= np.array(light['tint']) * light['scale']
+        model.light_specular[i] *= light['scale']
+        model.light_bulbradius[i] = light['softness']
+        model.light_active[i] = light['on']
+    model.vis.headlight.ambient[:] = look['ambient']
+    table = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MATERIAL, 'table')
+    rgba = model.mat_rgba[table, :3] * look['table_tone'] + np.array([1, 0, -1]) * look['table_hue']
+    model.mat_rgba[table, :3] = np.clip(rgba, 0, 1)
+    model.mat_specular[table] = look['table_gloss']
+
+
+def sample_camera_response(rng) -> dict:
+    """Webcam exposure, white balance, gamma, noise and blur for one camera of one episode."""
+    return dict(gain=float(rng.uniform(.8, 1.2)), white=rng.uniform(.92, 1.08, 3).tolist(),
+                gamma=float(rng.uniform(.88, 1.12)), noise=float(rng.uniform(0, 5)),
+                blur=float(rng.uniform(.4, 1.1)) if rng.random() < .3 else 0.)
+
+
+def camera_response(frame: np.ndarray, response: dict, rng) -> np.ndarray:
+    image = frame.astype(np.float32) / 255
+    image = np.clip(image * response['gain'] * np.array(response['white']), 0, 1) ** response['gamma']
+    if response['blur']:
+        image = cv2.GaussianBlur(image, (0, 0), response['blur'])
+    image = image * 255 + rng.normal(0, response['noise'], image.shape)
+    return np.clip(image, 0, 255).astype(np.uint8)
+
+
+class OperatorShadows:
+    """Soft dark shapes drifting smoothly over a camera's view, like the operator's arms in real frames."""
+
+    def __init__(self, rng, frames: int, camera: str):
+        self.blobs = []
+        for _ in range(int(rng.integers(1, 3))):
+            keys = max(2, frames // 60)
+            # The operator stands behind the arms: shadows enter from the bottom of the overhead view.
+            lo, hi = ((.1, .55), (.9, 1.1)) if camera == 'overhead' else ((-.1, -.1), (1.1, 1.1))
+            points = rng.uniform(lo, hi, (keys, 2)) * 256
+            self.blobs.append(dict(
+                path=np.stack([np.interp(np.linspace(0, keys - 1, frames), np.arange(keys), points[:, k])
+                               for k in range(2)], 1),
+                axes=rng.uniform([40, 15], [120, 45]), angle=float(rng.uniform(0, 180)),
+                spin=float(rng.uniform(-.2, .2)), darkness=float(rng.uniform(.35, .65)),
+                blur=float(rng.uniform(10, 25))))
+
+    def apply(self, frame: np.ndarray, i: int) -> np.ndarray:
+        mask = np.zeros(frame.shape[:2], np.float32)
+        for blob in self.blobs:
+            centre = tuple(int(v) for v in blob['path'][i])
+            cv2.ellipse(mask, centre, tuple(int(a) for a in blob['axes']), blob['angle'] + blob['spin'] * i,
+                        0, 360, blob['darkness'], -1)
+        mask = cv2.GaussianBlur(mask, (0, 0), self.blobs[0]['blur'])
+        return (frame * (1 - np.clip(mask, 0, .7))[..., None]).astype(np.uint8)
+
+
+def transfer_shading(restyled: np.ndarray, lit: np.ndarray, unlit: np.ndarray) -> np.ndarray:
+    """Multiply the sim's shadows and highlights (lit / unlit luminance) into a restyled frame."""
+    luminance = lambda x: x.astype(np.float32).mean(-1) + 4
+    ratio = np.clip(luminance(lit) / luminance(unlit), .25, 2.5)[..., None]
+    return np.clip(restyled * ratio, 0, 255).astype(np.uint8)
 
 
 def real_style_bank(files: int = 3, per_camera: int = 24, cache: Path = ROOT / 'outputs/real_style_bank'):
@@ -168,52 +275,72 @@ def restyle_settings(args):
                     ip_scale=args.restyle_ip, prompts=PROMPTS, negative=NEGATIVE)
 
 
-def render_episode(source: Path, dest: Path, restyle_seed=None, settings=None):
-    """Write JPEGs per camera; optionally restyle them. Returns (frames, report)."""
+def episode_look(meta: dict, copy: int, operator_share: float) -> dict:
+    """Per-(episode, copy) augmentation; copy 0 is the estimated real lab with no extras."""
+    rng = np.random.default_rng([meta['seed'], copy])
+    if copy == 0:
+        return dict(copy=0)
+    return dict(copy=copy, appearance=sample_appearance(rng),
+                response={c: sample_camera_response(rng) for c in CAMERAS},
+                operator_shadows=bool(rng.random() < operator_share), noise_seed=int(rng.integers(2**31)))
+
+
+def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, settings=None):
+    """Write JPEGs per camera, augmented and optionally restyled. Returns (frames, report)."""
     meta = json.loads((source / 'meta.json').read_text())
     with np.load(source / 'data.npz') as data:
         qpos = data['qpos']
-    views = Views(meta['overhead_setup'], jitter_seed=meta['seed'])
-    report = dict(overhead_setup=meta['overhead_setup'])
+    views = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919 * look['copy'],
+                  appearance=look.get('appearance'))
+    report = dict(source=source.name, overhead_setup=meta['overhead_setup'], **look)
     global restyler, bank
     for camera in CAMERAS:
-        rgb, depth, ids = [], [], []
+        lit, unlit, depth, ids = [], [], [], []
         for q in qpos:
             views.set(q)
             if restyle_seed is None:
-                rgb.append(views.render(camera))
+                lit.append(views.render(camera))
             else:
                 r, d, g = views.render(camera, maps=True)
-                rgb.append(r), depth.append(d), ids.append(g)
-        rgb = np.stack(rgb)
+                lit.append(r), depth.append(d), ids.append(g)
+                unlit.append(views.render(camera, unlit=True))
+        rgb = np.stack(lit)
         if restyle_seed is not None:
             from tools.sim2real_augment import Restyler, boundary_recall, flicker
             if 'restyler' not in globals():
                 restyler = Restyler(settings, ip_adapter=settings.ip_scale > 0)
                 bank = real_style_bank()
-            ids = np.stack(ids)
+            ids, unlit = np.stack(ids), np.stack(unlit)
             keep = np.isin(ids, views.kept_geoms)
             background = (ids < 0) | np.isin(ids, views.background_geoms)
             reference = bank[camera][restyle_seed % len(bank[camera])]
-            restyled = restyler.episode(rgb, np.stack(depth), ids, keep, restyle_seed,
+            # Restyle the unlit render, then put the scene's shadows and glare back exactly.
+            restyled = restyler.episode(unlit, np.stack(depth), ids, keep, restyle_seed,
                                         'overhead' if camera == 'overhead' else 'wrist', background, reference)
+            restyled = np.stack([transfer_shading(r, a, b) for r, a, b in zip(restyled, rgb, unlit)])
             sample = np.linspace(0, len(rgb) - 1, min(10, len(rgb))).astype(int)
-            report[camera] = dict(outline_recall=float(np.mean([boundary_recall(ids[i], restyled[i]) for i in sample])),
-                                  flicker=flicker(restyled, rgb))
+            report[f'{camera}_restyle'] = dict(
+                outline_recall=float(np.mean([boundary_recall(ids[i], restyled[i]) for i in sample])),
+                flicker=flicker(restyled, rgb))
             rgb = restyled
+        if look['copy']:
+            rng = np.random.default_rng([look['noise_seed'], list(CAMERAS).index(camera)])
+            shadows = OperatorShadows(rng, len(rgb), camera) if look['operator_shadows'] else None
+            rgb = np.stack([camera_response(shadows.apply(f, i) if shadows else f, look['response'][camera], rng)
+                            for i, f in enumerate(rgb)])
         (dest / camera).mkdir(parents=True, exist_ok=True)
         for i, frame in enumerate(rgb):
             cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                         [cv2.IMWRITE_JPEG_QUALITY, 92])
     if restyle_seed is not None:
-        report.update(seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)])
-        (dest / 'restyle.json').write_text(json.dumps(report, indent=2) + '\n')
+        report.update(restyle_seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)])
+    (dest / 'look.json').write_text(json.dumps(report, indent=2) + '\n')
     return len(qpos), report
 
 
-def render_job(source, dest, restyle_seed, settings):
+def render_job(source, dest, look, restyle_seed, settings):
     from lerobot.datasets.compute_stats import compute_episode_stats
-    count, report = render_episode(source, dest, restyle_seed, settings)
+    count, report = render_episode(source, dest, look, restyle_seed, settings)
     image_features = {k: v for k, v in features().items() if v['dtype'] == 'image'}
     buffer = {key: [str(dest / key.rsplit('.', 1)[-1] / f'{j:05d}.jpg') for j in range(count - 1)]
               for key in image_features}
@@ -230,6 +357,7 @@ def export(args):
         episodes = episodes[:args.limit]
     if not episodes:
         raise SystemExit('no episodes')
+    items = [(episode, copy) for copy in range(args.copies) for episode in episodes]
     if args.output.exists() or args.rendered.exists():
         raise SystemExit('output or rendered directory exists; use fresh paths')
     settings = restyle_settings(args)
@@ -237,21 +365,22 @@ def export(args):
                                     robot_type='panthera_ht_bimanual_sim', features=features(), use_videos=False,
                                     image_writer_threads=0, metadata_buffer_size=20)
     pool = ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn'))
-    pending, restyled, total, started = {}, {}, 0, time.time()
+    pending, looks, total, started = {}, {}, 0, time.time()
 
     def submit(i):
+        source, copy = items[i]
         seed = (args.restyle_seed * 100003 + i
                 if np.random.default_rng([args.restyle_seed, i]).random() < args.restyle_fraction else None)
-        pending[i] = pool.submit(render_job, episodes[i], args.rendered / episodes[i].name, seed, settings)
+        look = episode_look(json.loads((source / 'meta.json').read_text()), copy, args.operator_shadows)
+        pending[i] = pool.submit(render_job, source, args.rendered / f'{source.name}_c{copy}', look, seed, settings)
 
-    for i in range(min(len(episodes), args.workers * 2)):
+    for i in range(min(len(items), args.workers * 2)):
         submit(i)
     try:
-        for i, source in enumerate(episodes):
+        for i, (source, copy) in enumerate(items):
             count, image_stats, report = pending.pop(i).result()
-            if 'seed' in report:
-                restyled[source.name] = report
-            dest = args.rendered / source.name
+            dest = args.rendered / f'{source.name}_c{copy}'
+            looks[dest.name] = report
             meta = json.loads((source / 'meta.json').read_text())
             with np.load(source / 'data.npz') as data:
                 state, velocity, effort = data['state'], data['velocity'], data['effort']
@@ -269,9 +398,10 @@ def export(args):
                 for camera in CAMERAS:
                     shutil.rmtree(dest / camera)
             total += n
-            print(json.dumps(dict(episodes=i + 1, of=len(episodes), frames=total, restyled=len(restyled),
+            restyled = sum('restyle_seed' in r for r in looks.values())
+            print(json.dumps(dict(episodes=i + 1, of=len(items), frames=total, restyled=restyled,
                                   elapsed_s=round(time.time() - started))), flush=True)
-            if i + args.workers * 2 < len(episodes):
+            if i + args.workers * 2 < len(items):
                 submit(i + args.workers * 2)
     finally:
         pool.shutdown(wait=True, cancel_futures=True)
@@ -281,49 +411,61 @@ def export(args):
                       fps=FPS, action_alignment='next 20 Hz state, as in the real dataset',
                       gripper_units='radians, linear placeholder map from sim finger opening (0 closed, 2 open)',
                       effort_units='arm Nm; gripper entry is sim finger force in N',
-                      cameras={c: s for c, s in CAMERAS.items()}, episodes=[e.name for e in episodes])
+                      cameras={c: s for c, s in CAMERAS.items()}, copies=args.copies,
+                      operator_shadow_share=args.operator_shadows,
+                      lights={k: dict(v, pos=v['pos'].tolist()) for k, v in LIGHTS.items()},
+                      episodes=looks)
     if args.restyle_fraction:
         provenance['restyle'] = dict(fraction=args.restyle_fraction, seed=args.restyle_seed,
                                      settings={k: v for k, v in asdict(settings).items() if k not in ('prompts',)},
-                                     prompts=list(PROMPTS), episodes=restyled)
-    (args.output / 'meta/provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
-    (args.output / 'COMPLETE').write_text(f'{len(episodes)} episodes, {total} frames\n')
+                                     prompts=list(PROMPTS), shading='sim shadows/highlights multiplied back in')
+    (args.output / 'meta/provenance.json').write_text(json.dumps(provenance, indent=2, default=str) + '\n')
+    (args.output / 'COMPLETE').write_text(f'{len(items)} episodes, {total} frames\n')
 
 
 def preview(args):
-    """One episode, three spread frames: per camera the render, the restyle and a real frame."""
+    """One episode, spread frames; per camera: estimated lab | augmented look | restyled | real."""
     from dataclasses import replace
     episode = sorted(p.parent for p in args.episodes.glob('episode_*/data.npz'))[args.index]
     meta = json.loads((episode / 'meta.json').read_text())
     with np.load(episode / 'data.npz') as data:
         frames = np.linspace(0, len(data['qpos']) - 1, args.frames + 2)[1:-1].astype(int)
         qpos = data['qpos'][frames]
-    views = Views(meta['overhead_setup'], jitter_seed=meta['seed'])
+    look = episode_look(meta, 1 + args.seed, 1.)
+    base = Views(meta['overhead_setup'], jitter_seed=meta['seed'])
+    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'])
     bank = real_style_bank()
-    from tools.sim2real_augment import Restyler
     settings = restyle_settings(args)
-    restyler = Restyler(settings, ip_adapter=settings.ip_scale > 0) if not args.no_restyle else None
+    restyler = None
+    if not args.no_restyle:
+        from tools.sim2real_augment import Restyler
+        restyler = Restyler(settings, ip_adapter=settings.ip_scale > 0)
+        # Preview frames are seconds apart, so carrying the still background over
+        # from the previous frame (the export's anti-flicker step) would stitch them.
+        restyler.settings = replace(settings, carry_static=False)
     rows = []
-    for camera in CAMERAS:
-        maps = [views.set(q) or views.render(camera, maps=True) for q in qpos]
-        rgb, depth, ids = (np.stack(x) for x in zip(*maps))
-        out = [rgb]
+    for k, camera in enumerate(CAMERAS):
+        plain = np.stack([base.set(q) or base.render(camera) for q in qpos])
+        maps = [varied.set(q) or (*varied.render(camera, maps=True), varied.render(camera, unlit=True)) for q in qpos]
+        lit, depth, ids, unlit = (np.stack(x) for x in zip(*maps))
+        rng = np.random.default_rng([look['noise_seed'], k])
+        shadows = OperatorShadows(rng, len(lit) * 30, camera)
+        finish = lambda images: np.stack([camera_response(shadows.apply(f, 30 * i), look['response'][camera], rng)
+                                          for i, f in enumerate(images)])
+        out = [plain, finish(lit)]
         if restyler is not None:
-            keep = np.isin(ids, views.kept_geoms)
-            background = (ids < 0) | np.isin(ids, views.background_geoms)
-            # Preview frames are seconds apart, so carrying the still background over
-            # from the previous frame (the export's anti-flicker step) would stitch them.
-            restyler.settings = replace(settings, carry_static=False)
-            out.append(restyler.episode(rgb, depth, ids, keep, args.seed,
-                                        'overhead' if camera == 'overhead' else 'wrist', background,
-                                        bank[camera][args.seed % len(bank[camera])]))
-        out.append(np.stack([bank[camera][(args.seed + k) % len(bank[camera])] for k in range(len(rgb))]))
-        for i in range(len(rgb)):
+            keep = np.isin(ids, varied.kept_geoms)
+            background = (ids < 0) | np.isin(ids, varied.background_geoms)
+            restyled = restyler.episode(unlit, depth, ids, keep, args.seed, 'overhead' if camera == 'overhead'
+                                        else 'wrist', background, bank[camera][args.seed % len(bank[camera])])
+            out.append(finish(np.stack([transfer_shading(r, a, b) for r, a, b in zip(restyled, lit, unlit)])))
+        out.append(np.stack([bank[camera][(args.seed + i) % len(bank[camera])] for i in range(len(lit))]))
+        for i in range(len(lit)):
             rows.append(np.concatenate([o[i] for o in out], 1))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
-    print(f"wrote {args.output}: rows overhead, wrist_port2 (left), wrist_port3 (right); columns sim"
-          f"{'' if restyler is None else ', restyled'}, real")
+    print(f"wrote {args.output}: rows overhead, wrist_port2 (left), wrist_port3 (right); columns estimated lab, "
+          f"augmented{'' if restyler is None else ', augmented + restyled'}, real")
 
 
 def main():
@@ -343,6 +485,8 @@ def main():
     p.add_argument('--rendered', type=Path, default=ROOT / 'outputs/bimanual_rendered')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--limit', type=int, help='first N episodes only')
+    p.add_argument('--copies', type=int, default=1, help='renders per demo; copies after the first are augmented')
+    p.add_argument('--operator-shadows', type=float, default=.5, help='share of augmented copies with operator shadows')
     p.add_argument('--restyle-fraction', type=float, default=0.)
     p.add_argument('--restyle-seed', type=int, default=0)
     p.add_argument('--keep-jpegs', action='store_true')

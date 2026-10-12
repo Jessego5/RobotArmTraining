@@ -7,7 +7,7 @@
 
   <visual>
     <global offwidth="1920" offheight="1080"/>
-    <headlight ambient="0.15 0.15 0.15" diffuse="0.25 0.25 0.25"/>
+    <headlight ambient="0.22 0.22 0.22" diffuse="0.12 0.12 0.12" specular="0 0 0"/>
   </visual>
 
   <default>
@@ -34,6 +34,7 @@
   </default>
 
   <asset>
+    <material name="table" specular="0.6" shininess="0.9" rgba="0.8 0.62 0.4 1"/>
     <mesh name="left/base_link" content_type="model/stl" file="meshes/visual/base_link.STL"/>
     <mesh name="left/link1" content_type="model/stl" file="meshes/visual/link1.STL"/>
     <mesh name="left/link2" content_type="model/stl" file="meshes/visual/link2.STL"/>
@@ -79,10 +80,11 @@
   <worldbody>
     <geom name="floor" size="0 0 0.05" pos="0 0 -0.75" type="plane" rgba="0.35 0.35 0.38 1"/>
     <camera name="overhead" quat="0.60804 0.360953 -0.360953 -0.60804" pos="-0.8 0 1" fovy="35"/>
-    <light pos="0.45 0 2" diffuse="0.45 0.45 0.45" type="directional"/>
-    <light pos="0.45 0.5 1.5" dir="0 -0.287348 -0.957826" diffuse="0.15 0.15 0.15"/>
+    <light name="ceiling_left" pos="3 0.65 1.9" dir="-0.797015 -0.195494 -0.571445" bulbradius="0.15" cutoff="80" diffuse="0.55 0.55 0.52" specular="0.5 0.5 0.5"/>
+    <light name="ceiling_right" pos="3 -0.3 1.9" dir="-0.809278 0.0916164 -0.580237" bulbradius="0.15" cutoff="80" diffuse="0.55 0.55 0.52" specular="0.5 0.5 0.5"/>
+    <light name="ceiling_over" pos="0.2 0.1 1.9" dir="0.0785944 -0.0523963 -0.995529" bulbradius="0.15" cutoff="80" diffuse="0.25 0.25 0.24" specular="0.1 0.1 0.1"/>
     <body name="table" pos="0.45 0 -0.02">
-      <geom name="table_top" size="0.6 0.7 0.02" type="box" friction="0.4 0.02 0.0005" rgba="0.8 0.62 0.4 1"/>
+      <geom name="table_top" size="0.6 0.7 0.02" type="box" friction="0.4 0.02 0.0005" material="table"/>
     </body>
     <body name="carrier" pos="0.32 -0.12 0.016">
       <joint name="carrier" type="free"/>
