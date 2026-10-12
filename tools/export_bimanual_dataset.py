@@ -311,7 +311,9 @@ def preview(args):
         if restyler is not None:
             keep = np.isin(ids, views.kept_geoms)
             background = (ids < 0) | np.isin(ids, views.background_geoms)
-            restyler.settings = replace(settings)
+            # Preview frames are seconds apart, so carrying the still background over
+            # from the previous frame (the export's anti-flicker step) would stitch them.
+            restyler.settings = replace(settings, carry_static=False)
             out.append(restyler.episode(rgb, depth, ids, keep, args.seed,
                                         'overhead' if camera == 'overhead' else 'wrist', background,
                                         bank[camera][args.seed % len(bank[camera])]))

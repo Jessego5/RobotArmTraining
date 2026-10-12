@@ -78,7 +78,7 @@ class Settings:
     depth_scale: float = .9
     canny_scale: float = .5
     # Fixed per-camera inverse-depth ranges (m), so brightness does not pulse.
-    depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.), ('overhead', .3, 1.5))
+    depth_range: tuple = (('shoulder', .6, 2.2), ('wrist', .03, 1.), ('overhead', .8, 3.))
     batch: int = 8
     # Background pixels (sky, floor, table) whose render did not change since
     # the previous frame keep the previous restyle, so a fixed camera's
