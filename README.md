@@ -478,8 +478,21 @@ It restyles an unlit render and then multiplies the sim's shadows and glare
 back in, so they stay where the lights put them. Part and finger pixels are
 copied back from the render.
 
+### With the real CAD parts
+
+`sim/bimanual_cad.py` puts Zeb's Onshape carrier, gear and pin, his fixture and
+his place-then-push controller (`tools/bimanual_actuator_ik.py`) into the
+real-matched layout. The fixture and its stations are rotated so the gear slot
+faces the left arm. `tools/collect_bimanual_cad.py` runs that controller 4x
+faster than his pace, using the real arms' joint speeds in free motion. It
+keeps an episode when the carrier is held, the gear is seated, and the pin passes
+through both bores; full pin depth is recorded but not required. In 8 test seeds
+all were kept and 7 fully pressed, at ~31 s each. The exporter reads these
+episodes like the stand-in ones.
+
 ```bash
-bash tools/pod_bimanual.sh            # collect, preview, export (see the script for settings)
+bash tools/pod_bimanual.sh                  # CAD scene: collect, preview, export
+SCENE=standin bash tools/pod_bimanual.sh    # stand-in parts
 ```
 
 `tools/train_real_act.py` trains ACT on the 227 real demonstrations

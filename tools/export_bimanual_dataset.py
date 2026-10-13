@@ -99,8 +99,21 @@ def fisheye_maps(source: int, out: int):
 class Views:
     """The three real camera views of a model, with matching depth and segmentation."""
 
-    def __init__(self, overhead_setup: str, jitter_seed: int | None = None, appearance: dict | None = None):
-        self.model = build_model(overhead=OVERHEAD_SETUPS[overhead_setup])
+    def __init__(self, overhead_setup: str, jitter_seed: int | None = None, appearance: dict | None = None,
+                 meta: dict | None = None):
+        cad = (meta or {}).get('scene') == 'sim/bimanual_cad.py'
+        if cad:  # Zeb's CAD parts in the real-matched layout
+            from sim.bimanual_cad import CAMERAS as cad_cameras, USED, build_scene
+            self.model = mujoco.MjModel.from_xml_path(str(build_scene(overhead_setup)))
+            camera_names, parts = cad_cameras, USED
+            fixture = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_carrier')
+            self.model.body_pos[fixture] = meta['fixture']['pos']
+            self.model.body_quat[fixture] = meta['fixture']['quat']
+            self.model.geom_pos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, 'fixture'), :2] = \
+                meta['fixture']['pos'][:2]
+        else:
+            self.model = build_model(overhead=OVERHEAD_SETUPS[overhead_setup])
+            camera_names, parts = CAMERAS, PARTS
         self.data = mujoco.MjData(self.model)
         m = self.model
         if jitter_seed is not None:  # the real cameras were not calibrated or fixed exactly
@@ -108,7 +121,8 @@ class Views:
             cam = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, 'overhead')
             m.cam_pos[cam] += rng.uniform(-.02, .02, 3)
             m.cam_fovy[cam] += rng.uniform(-3, 3)
-        self.cameras = {name: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, sim) for name, sim in CAMERAS.items()}
+        self.cameras = {name: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, sim)
+                        for name, sim in camera_names.items()}
         for name in ('wrist_port2', 'wrist_port3'):
             m.cam_fovy[self.cameras[name]] = WRIST_FOV
         if appearance:
@@ -120,10 +134,11 @@ class Views:
         self.options = mujoco.MjvOption()
         self.options.sitegroup[:] = 0
         body_names = {b: mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or '' for b in range(m.nbody)}
-        kept = {b for b, n in body_names.items() if n in PARTS or n.endswith(('/L_finger', '/R_finger'))}
+        kept = {b for b, n in body_names.items() if n in parts or n.endswith(('L_finger', 'R_finger'))}
         self.kept_geoms = np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] in kept])
         self.background_geoms = np.array([g for g in range(m.ngeom) if body_names[m.geom_bodyid[g]] == 'table'
-                                          or mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) == 'floor'])
+                                          or mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g)
+                                          in ('floor', 'table_top')])
 
     def set(self, qpos):
         self.data.qpos[:] = qpos
@@ -291,7 +306,7 @@ def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, sett
     with np.load(source / 'data.npz') as data:
         qpos = data['qpos']
     views = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919 * look['copy'],
-                  appearance=look.get('appearance'))
+                  appearance=look.get('appearance'), meta=meta)
     report = dict(source=source.name, overhead_setup=meta['overhead_setup'], **look)
     global restyler, bank
     for camera in CAMERAS:
@@ -461,8 +476,8 @@ def preview(args):
         frames = np.linspace(0, len(data['qpos']) - 1, args.frames + 2)[1:-1].astype(int)
         qpos = data['qpos'][frames]
     look = episode_look(meta, 1 + args.seed, 1.)
-    base = Views(meta['overhead_setup'], jitter_seed=meta['seed'])
-    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'])
+    base = Views(meta['overhead_setup'], jitter_seed=meta['seed'], meta=meta)
+    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'], meta=meta)
     bank = real_style_bank()
     settings = restyle_settings(args)
     restyler = None
