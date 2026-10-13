@@ -339,15 +339,27 @@ def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, sett
 
 
 def render_job(source, dest, look, restyle_seed, settings):
+    """Render one (episode, copy) into `dest`; `done.json` marks it finished for resuming."""
+    import pickle
     from lerobot.datasets.compute_stats import compute_episode_stats
+    shutil.rmtree(dest, ignore_errors=True)  # a half-rendered folder from an interrupted run
+    dest.mkdir(parents=True)
     count, report = render_episode(source, dest, look, restyle_seed, settings)
     image_features = {k: v for k, v in features().items() if v['dtype'] == 'image'}
     buffer = {key: [str(dest / key.rsplit('.', 1)[-1] / f'{j:05d}.jpg') for j in range(count - 1)]
               for key in image_features}
-    return count, compute_episode_stats(buffer, image_features), report
+    (dest / 'image_stats.pkl').write_bytes(pickle.dumps(compute_episode_stats(buffer, image_features)))
+    (dest / 'done.json').write_text(json.dumps(dict(count=count, report=report), default=str) + '\n')
 
 
 def export(args):
+    """Render every (episode, copy) to JPEG folders, then write the dataset in one pass.
+
+    Rendering (and restyling) is the slow part and resumes: rerunning the same
+    command skips folders already marked done. The dataset itself is rebuilt from
+    the rendered folders in minutes, so an interrupted write is simply redone.
+    """
+    import pickle
     from dataclasses import asdict
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     from tools.export_scripted_dataset import save_prepared_episode
@@ -358,33 +370,52 @@ def export(args):
     if not episodes:
         raise SystemExit('no episodes')
     items = [(episode, copy) for copy in range(args.copies) for episode in episodes]
-    if args.output.exists() or args.rendered.exists():
-        raise SystemExit('output or rendered directory exists; use fresh paths')
+    if (args.output / 'COMPLETE').exists():
+        raise SystemExit(f'{args.output} is already complete')
     settings = restyle_settings(args)
+    contract = dict(episodes=str(args.episodes.resolve()), count=len(items), copies=args.copies,
+                    operator_shadows=args.operator_shadows, restyle_fraction=args.restyle_fraction,
+                    restyle_seed=args.restyle_seed,
+                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+    args.rendered.mkdir(parents=True, exist_ok=True)
+    contract_path = args.rendered / 'settings.json'
+    if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
+        raise SystemExit(f'{args.rendered} was rendered with other settings; use a fresh --rendered path')
+    contract_path.write_text(json.dumps(contract, indent=2) + '\n')
+
+    dests = [args.rendered / f'{source.name}_c{copy}' for source, copy in items]
+    todo = [i for i, dest in enumerate(dests) if not (dest / 'done.json').exists()]
+    print(f'{len(items) - len(todo)} of {len(items)} episodes already rendered; rendering {len(todo)}', flush=True)
+    started = time.time()
+    with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        futures = {}
+        for i in todo:
+            source, copy = items[i]
+            seed = (args.restyle_seed * 100003 + i
+                    if np.random.default_rng([args.restyle_seed, i]).random() < args.restyle_fraction else None)
+            look = episode_look(json.loads((source / 'meta.json').read_text()), copy, args.operator_shadows)
+            futures[pool.submit(render_job, source, dests[i], look, seed, settings)] = i
+        from concurrent.futures import as_completed
+        for k, future in enumerate(as_completed(futures), 1):
+            future.result()
+            elapsed = time.time() - started
+            print(json.dumps(dict(rendered=k, of=len(todo), elapsed_s=round(elapsed),
+                                  eta_h=round(elapsed / k * (len(todo) - k) / 3600, 2))), flush=True)
+
+    # Write the dataset from the rendered folders; a partial earlier write is discarded.
+    shutil.rmtree(args.output, ignore_errors=True)
     dataset = LeRobotDataset.create(repo_id='local/panthera_bimanual_sim', root=args.output, fps=FPS,
                                     robot_type='panthera_ht_bimanual_sim', features=features(), use_videos=False,
                                     image_writer_threads=0, metadata_buffer_size=20)
-    pool = ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn'))
-    pending, looks, total, started = {}, {}, 0, time.time()
-
-    def submit(i):
-        source, copy = items[i]
-        seed = (args.restyle_seed * 100003 + i
-                if np.random.default_rng([args.restyle_seed, i]).random() < args.restyle_fraction else None)
-        look = episode_look(json.loads((source / 'meta.json').read_text()), copy, args.operator_shadows)
-        pending[i] = pool.submit(render_job, source, args.rendered / f'{source.name}_c{copy}', look, seed, settings)
-
-    for i in range(min(len(items), args.workers * 2)):
-        submit(i)
+    looks, total = {}, 0
     try:
-        for i, (source, copy) in enumerate(items):
-            count, image_stats, report = pending.pop(i).result()
-            dest = args.rendered / f'{source.name}_c{copy}'
-            looks[dest.name] = report
+        for i, ((source, copy), dest) in enumerate(zip(items, dests)):
+            done = json.loads((dest / 'done.json').read_text())
+            looks[dest.name] = done['report']
             meta = json.loads((source / 'meta.json').read_text())
             with np.load(source / 'data.npz') as data:
                 state, velocity, effort = data['state'], data['velocity'], data['effort']
-            n = count - 1  # the last observation has no next-state action
+            n = done['count'] - 1  # the last observation has no next-state action
             buffer = dataset.episode_buffer
             buffer.update(size=n, task=[meta['task']] * n, timestamp=np.arange(n) / FPS, frame_index=np.arange(n))
             buffer['observation.state'] = state[:-1].astype(np.float32)
@@ -393,18 +424,11 @@ def export(args):
             buffer['observation.effort'] = effort[:-1].astype(np.float32)
             for camera in CAMERAS:
                 buffer[f'observation.images.{camera}'] = [str(dest / camera / f'{j:05d}.jpg') for j in range(n)]
-            save_prepared_episode(dataset, image_stats)
-            if not args.keep_jpegs:
-                for camera in CAMERAS:
-                    shutil.rmtree(dest / camera)
+            save_prepared_episode(dataset, pickle.loads((dest / 'image_stats.pkl').read_bytes()))
             total += n
-            restyled = sum('restyle_seed' in r for r in looks.values())
-            print(json.dumps(dict(episodes=i + 1, of=len(items), frames=total, restyled=restyled,
-                                  elapsed_s=round(time.time() - started))), flush=True)
-            if i + args.workers * 2 < len(items):
-                submit(i + args.workers * 2)
+            if (i + 1) % 25 == 0 or i + 1 == len(items):
+                print(json.dumps(dict(written=i + 1, of=len(items), frames=total)), flush=True)
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
         dataset.finalize()
         dataset.stop_image_writer()
     provenance = dict(source='sim', generator='tools/collect_bimanual.py', exporter='tools/export_bimanual_dataset.py',
@@ -421,6 +445,11 @@ def export(args):
                                      prompts=list(PROMPTS), shading='sim shadows/highlights multiplied back in')
     (args.output / 'meta/provenance.json').write_text(json.dumps(provenance, indent=2, default=str) + '\n')
     (args.output / 'COMPLETE').write_text(f'{len(items)} episodes, {total} frames\n')
+    if not args.keep_jpegs:
+        for dest in dests:
+            for camera in CAMERAS:
+                shutil.rmtree(dest / camera, ignore_errors=True)
+    print(f'complete: {len(items)} episodes, {total} frames at {args.output}', flush=True)
 
 
 def preview(args):
@@ -489,7 +518,7 @@ def main():
     p.add_argument('--operator-shadows', type=float, default=.5, help='share of augmented copies with operator shadows')
     p.add_argument('--restyle-fraction', type=float, default=0.)
     p.add_argument('--restyle-seed', type=int, default=0)
-    p.add_argument('--keep-jpegs', action='store_true')
+    p.add_argument('--keep-jpegs', action='store_true', help='keep the rendered JPEGs after writing the dataset')
     p = sub.add_parser('preview', parents=[common])
     p.add_argument('--output', type=Path, default=ROOT / 'outputs/bimanual_preview.jpg')
     p.add_argument('--index', type=int, default=0, help='which episode')
