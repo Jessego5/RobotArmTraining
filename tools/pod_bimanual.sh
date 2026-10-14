@@ -6,11 +6,13 @@
 #   STEP=preview bash tools/pod_bimanual.sh    # one step: collect | preview | export
 #
 # Settings (environment variables):
-#   SCENE=cad  EPISODES=300  WORKERS=16  COPIES=3  OPERATOR_SHADOWS=0.5  RESTYLE=0.3  RESTYLE_WORKERS=4
+#   SCENE=cad  EPISODES=300  WORKERS=16  COPIES=3  OPERATOR_SHADOWS=0.3  RESTYLE=0.5  RESTYLE_WORKERS=4
 #   SCENE=cad uses Zeb's real CAD parts and place-then-push controller (sim/bimanual_cad.py,
 #   ~31 s episodes); SCENE=standin uses the simple stand-in parts (sim/bimanual.py, ~17 s).
 #   COPIES renders every demo that many times (copy 0 as estimated, the rest with
-#   random lighting, operator shadows and webcam response), so 300 demos -> 900 episodes.
+#   random lighting, room, clutter, table surface, 3D operator hands, camera mounts,
+#   operator shadows and webcam response), so 300 demos -> 900 episodes. RESTYLE is the
+#   share of all episodes repainted toward the real look on top of that.
 #   WORK=/root/bimanual_$SCENE   (container disk: fast, not kept after the pod stops)
 #   OUT=/workspace/bimanual_$SCENE   (network volume: the preview and final dataset)
 set -euo pipefail
@@ -19,8 +21,8 @@ SCENE=${SCENE:-cad}
 EPISODES=${EPISODES:-300}
 WORKERS=${WORKERS:-16}
 COPIES=${COPIES:-3}
-OPERATOR_SHADOWS=${OPERATOR_SHADOWS:-0.5}
-RESTYLE=${RESTYLE:-0.3}
+OPERATOR_SHADOWS=${OPERATOR_SHADOWS:-0.3}
+RESTYLE=${RESTYLE:-0.5}
 RESTYLE_WORKERS=${RESTYLE_WORKERS:-4}  # each loads its own diffusion models; 8 ran out of memory on an 80 GB A100
 WORK=${WORK:-/root/bimanual_$SCENE}
 OUT=${OUT:-/workspace/bimanual_$SCENE}

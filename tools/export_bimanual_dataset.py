@@ -55,7 +55,7 @@ import cv2
 import mujoco
 import numpy as np
 
-from sim.bimanual import ARMS, LIGHTS, OVERHEAD_CROP, OVERHEAD_SETUPS, PARTS, build_model
+from sim.bimanual import ARMS, LIGHTS, OVERHEAD_CROP, OVERHEAD_SETUPS, PARTS, build_model, opening_to_rad
 
 FPS = 20
 CAMERAS = {'overhead': 'overhead', 'wrist_port2': 'left/wrist', 'wrist_port3': 'right/wrist'}
@@ -96,24 +96,51 @@ def fisheye_maps(source: int, out: int):
     return map_x, map_y, theta <= np.radians(FISHEYE_LIMIT)
 
 
+def scene_layout(cad: bool) -> dict:
+    """Names and heights `sim/scene_decor.py` needs for each scene."""
+    if cad:
+        from sim.actuator_env import TABLE_Z
+        links = [f'link{i}' for i in range(1, 7)]
+        return dict(table_z=TABLE_Z, operator_links={'left': 'link5', 'right': 'right_link5'},
+                    wrist_cameras=['left_wrist', 'right_wrist'],
+                    arm_bodies={'left': links, 'right': ['right_base'] + [f'right_{b}' for b in links]},
+                    clutter_meshes=[f'{p}_visual' for p in ('gear_1', 'gear_2', 'gear_4', 'pin_1', 'pin_3',
+                                                            'pin_4', 'large_carrier')])
+    links = [f'link{i}' for i in range(1, 7)]
+    return dict(table_z=0., operator_links={'left': 'left/link5', 'right': 'right/link5'},
+                wrist_cameras=['left/wrist', 'right/wrist'],
+                arm_bodies={s: [f'{s}/{b}' for b in ['base_link'] + links] for s in ARMS})
+
+
 class Views:
     """The three real camera views of a model, with matching depth and segmentation."""
 
     def __init__(self, overhead_setup: str, jitter_seed: int | None = None, appearance: dict | None = None,
-                 meta: dict | None = None):
+                 meta: dict | None = None, decor_seed: int | None = None):
+        from sim.scene_decor import Operators, decorate, perturb_model
         cad = (meta or {}).get('scene') == 'sim/bimanual_cad.py'
+        layout = scene_layout(cad)
         if cad:  # Zeb's CAD parts in the real-matched layout
             from sim.bimanual_cad import CAMERAS as cad_cameras, USED, build_scene
-            self.model = mujoco.MjModel.from_xml_path(str(build_scene(overhead_setup)))
+            spec = mujoco.MjSpec.from_file(str(build_scene(overhead_setup)))
             camera_names, parts = cad_cameras, USED
-            fixture = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_carrier')
+        else:
+            from sim.bimanual import build_spec
+            spec = build_spec(overhead=OVERHEAD_SETUPS[overhead_setup])
+            camera_names, parts = CAMERAS, PARTS
+        self.decor = {}
+        if decor_seed is not None:
+            self.decor = decorate(spec, np.random.default_rng(decor_seed), layout)
+        self.model = spec.compile()
+        if decor_seed is not None:
+            self.decor['perturbed'] = perturb_model(self.model, np.random.default_rng([decor_seed, 1]), layout)
+        self.operators = Operators(self.model, self.decor.get('operators', []))
+        if cad:
+            fixture = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_carrier')  # not in qpos
             self.model.body_pos[fixture] = meta['fixture']['pos']
             self.model.body_quat[fixture] = meta['fixture']['quat']
             self.model.geom_pos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, 'fixture'), :2] = \
                 meta['fixture']['pos'][:2]
-        else:
-            self.model = build_model(overhead=OVERHEAD_SETUPS[overhead_setup])
-            camera_names, parts = CAMERAS, PARTS
         self.data = mujoco.MjData(self.model)
         m = self.model
         if jitter_seed is not None:  # the real cameras were not calibrated or fixed exactly
@@ -136,13 +163,16 @@ class Views:
         body_names = {b: mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or '' for b in range(m.nbody)}
         kept = {b for b, n in body_names.items() if n in parts or n.endswith(('L_finger', 'R_finger'))}
         self.kept_geoms = np.array([g for g in range(m.ngeom) if m.geom_bodyid[g] in kept])
+        geom_name = lambda g: mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or ''
         self.background_geoms = np.array([g for g in range(m.ngeom) if body_names[m.geom_bodyid[g]] == 'table'
-                                          or mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g)
-                                          in ('floor', 'table_top')])
+                                          or geom_name(g) in ('floor', 'table_top')
+                                          or (geom_name(g).startswith('decor_')
+                                              and not geom_name(g).startswith('decor_operator'))])
 
     def set(self, qpos):
         self.data.qpos[:] = qpos
         mujoco.mj_forward(self.model, self.data)
+        self.operators.update(self.model, self.data)
 
     def _shape(self, name, image, nearest=False):
         if name == 'overhead':
@@ -186,9 +216,9 @@ def sample_appearance(rng) -> dict:
     for name, light in LIGHTS.items():
         tint = np.array([1 + .08 * warmth, 1., 1 - .10 * warmth]) * rng.uniform(.97, 1.03, 3)
         lights[name] = dict(
-            offset=(rng.normal(0, [.5, .4, .15])).tolist(),
-            scale=float(rng.uniform(.75, 1.3)), tint=tint.tolist(),
-            softness=float(rng.uniform(.02, .45)),
+            offset=(rng.normal(0, [.7, .6, .25])).tolist(),
+            scale=float(rng.uniform(.6, 1.5)), tint=tint.tolist(),
+            softness=float(rng.uniform(.02, .6)),
             on=bool(name != off and (name != 'ceiling_over' or rng.random() < .6)))
     return dict(lights=lights, ambient=float(rng.uniform(.15, .35)),
                 table_tone=float(rng.uniform(.85, 1.12)), table_hue=float(rng.uniform(-.04, .04)),
@@ -297,7 +327,8 @@ def episode_look(meta: dict, copy: int, operator_share: float) -> dict:
         return dict(copy=0)
     return dict(copy=copy, appearance=sample_appearance(rng),
                 response={c: sample_camera_response(rng) for c in CAMERAS},
-                operator_shadows=bool(rng.random() < operator_share), noise_seed=int(rng.integers(2**31)))
+                operator_shadows=bool(rng.random() < operator_share), noise_seed=int(rng.integers(2**31)),
+                decor_seed=int(rng.integers(2**31)))
 
 
 def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, settings=None):
@@ -306,8 +337,8 @@ def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, sett
     with np.load(source / 'data.npz') as data:
         qpos = data['qpos']
     views = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919 * look['copy'],
-                  appearance=look.get('appearance'), meta=meta)
-    report = dict(source=source.name, overhead_setup=meta['overhead_setup'], **look)
+                  appearance=look.get('appearance'), meta=meta, decor_seed=look.get('decor_seed'))
+    report = dict(source=source.name, overhead_setup=meta['overhead_setup'], decor=views.decor, **look)
     global restyler, bank
     for camera in CAMERAS:
         lit, unlit, depth, ids = [], [], [], []
@@ -351,6 +382,40 @@ def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, sett
         report.update(restyle_seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)])
     (dest / 'look.json').write_text(json.dumps(report, indent=2) + '\n')
     return len(qpos), report
+
+
+GRIPPERS = [6, 13]
+
+
+def episode_actions(data, action: str = 'measured') -> np.ndarray:
+    """Action label per observation, all at the next 20 Hz tick.
+
+    - `measured`: the next measured state, the real dataset's convention.
+    - `commanded`: what the controller commanded (joints, gripper openings).
+    - `commanded-gripper`: measured joints, commanded grippers.
+
+    They differ wherever the robot pushes against something. A gripper squeezing
+    a part is commanded shut while its measured opening is the part's width, so
+    replaying the measured width commands no squeeze and the grip loosens. The
+    arm joints differ less (~1 mrad mean, ~10 mrad at the 99th percentile in a
+    CAD demo, mostly during the gear and pin pushes), but enough: replaying a
+    CAD demo's commands completes the assembly, while measured joints or
+    measured grippers each fail it.
+    """
+    measured = data['state'][1:].astype(np.float32)
+    if action == 'measured':
+        return measured.copy()
+    if action not in ('commanded', 'commanded-gripper'):
+        raise ValueError(action)
+    if 'command' not in data:
+        raise SystemExit(f'--action {action} needs episodes recorded with their commands')
+    commanded = data['command'][1:].astype(np.float32).copy()
+    commanded[:, GRIPPERS] = opening_to_rad(commanded[:, GRIPPERS])
+    if action == 'commanded':
+        return commanded
+    measured = measured.copy()
+    measured[:, GRIPPERS] = commanded[:, GRIPPERS]
+    return measured
 
 
 def render_job(source, dest, look, restyle_seed, settings):
@@ -430,11 +495,12 @@ def export(args):
             meta = json.loads((source / 'meta.json').read_text())
             with np.load(source / 'data.npz') as data:
                 state, velocity, effort = data['state'], data['velocity'], data['effort']
+                actions = episode_actions(data, args.action)
             n = done['count'] - 1  # the last observation has no next-state action
             buffer = dataset.episode_buffer
             buffer.update(size=n, task=[meta['task']] * n, timestamp=np.arange(n) / FPS, frame_index=np.arange(n))
             buffer['observation.state'] = state[:-1].astype(np.float32)
-            buffer['action'] = state[1:].astype(np.float32)
+            buffer['action'] = actions
             buffer['observation.velocity'] = velocity[:-1].astype(np.float32)
             buffer['observation.effort'] = effort[:-1].astype(np.float32)
             for camera in CAMERAS:
@@ -448,6 +514,7 @@ def export(args):
         dataset.stop_image_writer()
     provenance = dict(source='sim', generator='tools/collect_bimanual.py', exporter='tools/export_bimanual_dataset.py',
                       fps=FPS, action_alignment='next 20 Hz state, as in the real dataset',
+                      action=args.action,
                       gripper_units='radians, linear placeholder map from sim finger opening (0 closed, 2 open)',
                       effort_units='arm Nm; gripper entry is sim finger force in N',
                       cameras={c: s for c, s in CAMERAS.items()}, copies=args.copies,
@@ -477,7 +544,8 @@ def preview(args):
         qpos = data['qpos'][frames]
     look = episode_look(meta, 1 + args.seed, 1.)
     base = Views(meta['overhead_setup'], jitter_seed=meta['seed'], meta=meta)
-    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'], meta=meta)
+    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'], meta=meta,
+                   decor_seed=look['decor_seed'])
     bank = real_style_bank()
     settings = restyle_settings(args)
     restyler = None
@@ -534,6 +602,8 @@ def main():
     p.add_argument('--restyle-fraction', type=float, default=0.)
     p.add_argument('--restyle-seed', type=int, default=0)
     p.add_argument('--keep-jpegs', action='store_true', help='keep the rendered JPEGs after writing the dataset')
+    p.add_argument('--action', choices=('measured', 'commanded', 'commanded-gripper'), default='measured',
+                   help='labels: next measured state (as the real data), the commands, or commanded grippers only')
     p = sub.add_parser('preview', parents=[common])
     p.add_argument('--output', type=Path, default=ROOT / 'outputs/bimanual_preview.jpg')
     p.add_argument('--index', type=int, default=0, help='which episode')

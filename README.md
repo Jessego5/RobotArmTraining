@@ -469,8 +469,17 @@ times. Copy 0 uses the estimated lab. The others vary, per episode:
 
 - light positions, brightness, warmth and shadow softness;
 - table tone and gloss;
-- drifting operator shadows (`--operator-shadows` share);
+- room walls, furniture and monitors, and clutter at the far end of the table;
+- 3D operator hands and forearms holding the robot wrists, as in hand-guided
+  demonstrations; they move with the robot and cast real shadows;
+- table surfaces: procedural wood grain, checker, speckle or plain;
+- wrist-camera mount jitter and arm finish;
+- drifting 2D operator shadows (`--operator-shadows` share);
 - webcam exposure, white balance, noise and blur.
+
+These are all visual-only (`sim/scene_decor.py`), so the recorded physics is
+unchanged. They add geometry and lighting, which the restyle keeps; the
+restyle replaces surface textures.
 
 `--restyle-fraction` repaints that share of episodes with the diffusion
 restyle, steered by real frames from the same camera through an IP-Adapter.
