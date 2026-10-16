@@ -164,6 +164,30 @@ def decorate(spec: mujoco.MjSpec, rng, layout: dict) -> dict:
                                quat=quat, size=size.tolist(), rgba=list(rng.uniform(.05, .9, 3)) + [1.], **VISUAL)
         info['clutter'] += 1
 
+    # Extra lights with their own shadows: a low window light, a desk lamp, another fixture.
+    info['lights'] = []
+    for k in range(int(rng.choice([0, 1, 1, 2]))):
+        kind = str(rng.choice(['window', 'lamp', 'ceiling']))
+        side = rng.choice([-1, 1])
+        if kind == 'window':  # low and far to one side: long, hard shadows across the table
+            pos = [rng.uniform(-.5, 1.5), side * rng.uniform(2.0, 3.0), tz + rng.uniform(.4, 1.2)]
+            colour = rng.uniform([.9, .9, .95], [1.1, 1.05, 1.2]) * rng.uniform(.4, .9)
+            cutoff, softness = 60., rng.uniform(0, .1)
+        elif kind == 'lamp':  # close to the table: one bright pool of light
+            pos = [rng.uniform(.0, .9), side * rng.uniform(.3, .8), tz + rng.uniform(.35, .7)]
+            colour = rng.uniform([1., .85, .6], [1.1, 1., .85]) * rng.uniform(.4, .9)
+            cutoff, softness = rng.uniform(25, 45), rng.uniform(.02, .2)
+        else:
+            pos = [rng.uniform(-.5, 2.5), rng.uniform(-1.5, 1.5), tz + rng.uniform(1.6, 2.2)]
+            colour = np.full(3, rng.uniform(.2, .6))
+            cutoff, softness = 80., rng.uniform(.05, .6)
+        target = np.array([rng.uniform(.15, .45), rng.uniform(-.15, .15), tz])
+        direction = target - np.array(pos)
+        world.add_light(name=f'decor_light_{k}', pos=pos, dir=(direction / np.linalg.norm(direction)).tolist(),
+                        type=mujoco.mjtLightType.mjLIGHT_SPOT, cutoff=float(cutoff), castshadow=True,
+                        diffuse=list(colour), specular=list(colour * .4), bulbradius=float(softness))
+        info['lights'].append(dict(kind=kind, pos=[float(v) for v in pos], colour=[float(v) for v in colour]))
+
     # Operator hands guiding the wrists: one mocap body per arm, posed per frame.
     skin = rng.choice([[.95, .80, .68], [.85, .64, .48], [.62, .44, .32], [.40, .27, .19]])
     sleeve = list(rng.uniform(.05, .8, 3)) + [1.]

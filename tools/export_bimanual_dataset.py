@@ -209,20 +209,24 @@ class Views:
 
 
 def sample_appearance(rng) -> dict:
-    """One episode's lighting and table look around the estimated real lab."""
+    """One episode's lighting and table look, around (and well beyond) the estimated real lab."""
     lights = {}
     warmth = rng.uniform(-1, 1)  # one room: cool fluorescent .. warm bulbs
-    off = rng.choice(['ceiling_left', 'ceiling_right', None, None, None, None])  # a front fixture out, sometimes
+    # Occasionally a clearly coloured cast: blue daylight, orange tungsten, green fluorescent.
+    cast = [np.array([.85, .92, 1.15]), np.array([1.2, .95, .7]), np.array([.92, 1.1, .9])][rng.integers(3)] \
+        if rng.random() < .15 else np.ones(3)
+    off = rng.choice(['ceiling_left', 'ceiling_right', 'both', None, None, None])  # front fixtures out, sometimes
     for name, light in LIGHTS.items():
-        tint = np.array([1 + .08 * warmth, 1., 1 - .10 * warmth]) * rng.uniform(.97, 1.03, 3)
+        tint = np.array([1 + .08 * warmth, 1., 1 - .10 * warmth]) * cast * rng.uniform(.97, 1.03, 3)
+        front_off = off == name or (off == 'both' and name != 'ceiling_over')
         lights[name] = dict(
-            offset=(rng.normal(0, [.7, .6, .25])).tolist(),
-            scale=float(rng.uniform(.6, 1.5)), tint=tint.tolist(),
-            softness=float(rng.uniform(.02, .6)),
-            on=bool(name != off and (name != 'ceiling_over' or rng.random() < .6)))
-    return dict(lights=lights, ambient=float(rng.uniform(.15, .35)),
-                table_tone=float(rng.uniform(.85, 1.12)), table_hue=float(rng.uniform(-.04, .04)),
-                table_gloss=float(rng.uniform(.2, .85)))
+            offset=(rng.normal(0, [.8, .7, .3])).tolist(),
+            scale=float(rng.uniform(.4, 1.8)), tint=tint.tolist(),
+            softness=float(rng.choice([rng.uniform(0, .05), rng.uniform(.05, .8)])),  # razor-sharp .. very soft
+            on=bool(not front_off and (name != 'ceiling_over' or rng.random() < .6 or off == 'both')))
+    return dict(lights=lights, ambient=float(rng.uniform(.06, .45)),
+                table_tone=float(rng.uniform(.8, 1.15)), table_hue=float(rng.uniform(-.05, .05)),
+                table_gloss=float(rng.uniform(.15, .9)))
 
 
 def apply_appearance(model, look: dict) -> None:
