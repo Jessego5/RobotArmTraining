@@ -105,7 +105,8 @@ def decorate(spec: mujoco.MjSpec, rng, layout: dict) -> dict:
              ('right', [(far - 2.2) / 2, -side, FLOOR_Z + height], [(far + 2.2) / 2, .05, height]),
              ('back', [-2.2, 0, FLOOR_Z + height], [.05, side, height])]
     for name, pos, size in walls:
-        material = _material(spec, f'decor_wall_{name}', rng, str(rng.choice(['plain', 'plain', 'gradient', 'speckle'])),
+        material = _material(spec, f'decor_wall_{name}', rng,
+                             str(rng.choice(['plain', 'gradient', 'speckle', 'checker', 'wood'])),
                              repeat=(2, 2))
         world.add_geom(name=f'decor_wall_{name}', type=mujoco.mjtGeom.mjGEOM_BOX, pos=pos, size=size,
                        material=material.name, **VISUAL)
@@ -195,8 +196,20 @@ def decorate(spec: mujoco.MjSpec, rng, layout: dict) -> dict:
         if rng.random() > layout.get('operator_share', .7):
             continue
         body = world.add_body(name=f'decor_operator_{side}', mocap=True)
-        body.add_geom(name=f'decor_operator_{side}_hand', type=mujoco.mjtGeom.mjGEOM_ELLIPSOID,
-                      size=[.04, .025, .045], pos=[0, 0, .015], rgba=list(skin) + [1.], **VISUAL)
+        # A hand: palm, four fingers curling around the robot wrist, and a thumb.
+        # Body frame: z runs up the forearm, x across the palm.
+        flesh = list(skin) + [1.]
+        body.add_geom(name=f'decor_operator_{side}_palm', type=mujoco.mjtGeom.mjGEOM_BOX,
+                      size=[.038, .012, .042], pos=[0, 0, .01], rgba=flesh, **VISUAL)
+        for f, x in enumerate((-.027, -.009, .009, .027)):
+            length = (.032, .038, .036, .028)[f]
+            body.add_geom(name=f'decor_operator_{side}_finger{f}a', type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                          fromto=[x, 0, -.032, x, -.010, -.032 - length], size=[.0085, 0, 0], rgba=flesh, **VISUAL)
+            body.add_geom(name=f'decor_operator_{side}_finger{f}b', type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                          fromto=[x, -.010, -.032 - length, x, -.034, -.040 - length], size=[.0078, 0, 0],
+                          rgba=flesh, **VISUAL)
+        body.add_geom(name=f'decor_operator_{side}_thumb', type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                      fromto=[.036, 0, 0, .05, -.03, -.03], size=[.0095, 0, 0], rgba=flesh, **VISUAL)
         body.add_geom(name=f'decor_operator_{side}_forearm', type=mujoco.mjtGeom.mjGEOM_CAPSULE,
                       fromto=[0, 0, .045, 0, 0, .22], size=[.028, 0, 0], rgba=list(skin) + [1.], **VISUAL)
         body.add_geom(name=f'decor_operator_{side}_sleeve', type=mujoco.mjtGeom.mjGEOM_CAPSULE,
@@ -258,4 +271,10 @@ def perturb_model(model, rng, layout: dict) -> dict:
             if model.geom_group[g] == 2 and model.geom_bodyid[g] in ids:
                 model.geom_rgba[g, :3] = np.clip(model.geom_rgba[g, :3] * tone, 0, 1)
         out[side] = float(tone)
+    # Occasional haze, like a hazy webcam or a dusty, smoky room.
+    out['haze'] = bool(rng.random() < .2)
+    if out['haze']:
+        model.vis.map.fogstart = float(rng.uniform(.8, 2.5))
+        model.vis.map.fogend = model.vis.map.fogstart + float(rng.uniform(1.5, 5.))
+        model.vis.rgba.fog[:] = list(rng.uniform(.5, .9, 3)) + [1.]
     return out

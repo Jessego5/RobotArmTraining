@@ -69,8 +69,12 @@ REAL_LOOK = ('two white and grey aluminium robot arms with white 3D printed fin-
 PROMPTS = (
     f'a webcam photo of {REAL_LOOK}, light maple butcher-block table with glossy reflections, university lab',
     f'a wide-angle photo of {REAL_LOOK}, wooden workbench with bright ceiling light glare, cluttered lab behind',
-    f'a fisheye camera photo of {REAL_LOOK}, light wooden table, fluorescent lighting, slight motion blur',
+    f'a fisheye camera photo of {REAL_LOOK}, light wooden table, cool fluorescent lighting, slight motion blur',
     f'a photo of {REAL_LOOK} on a pale wood table, overhead lights, realistic, slightly noisy webcam image',
+    f'a dim evening photo of {REAL_LOOK} on a wooden desk, a single warm desk lamp, deep shadows',
+    f'a photo of {REAL_LOOK} on a table by a window, harsh afternoon sunlight, long hard shadows',
+    f'an overcast daylight photo of {REAL_LOOK} on a light wood workbench, soft diffuse light',
+    f'a photo of {REAL_LOOK} in a workshop, warm tungsten light, worn plywood table, grainy',
 )
 NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, text, watermark, wooden robot, orange robot, '
             'extra robot arms, extra gears, coloured objects, cubes, blocks')
@@ -118,6 +122,7 @@ class Views:
     def __init__(self, overhead_setup: str, jitter_seed: int | None = None, appearance: dict | None = None,
                  meta: dict | None = None, decor_seed: int | None = None):
         from sim.scene_decor import Operators, decorate, perturb_model
+        self.crop_shift, self.fog = np.zeros(2, int), False
         cad = (meta or {}).get('scene') == 'sim/bimanual_cad.py'
         layout = scene_layout(cad)
         if cad:  # Zeb's CAD parts in the real-matched layout
@@ -134,6 +139,7 @@ class Views:
         self.model = spec.compile()
         if decor_seed is not None:
             self.decor['perturbed'] = perturb_model(self.model, np.random.default_rng([decor_seed, 1]), layout)
+            self.fog = self.decor['perturbed'].get('haze', False)
         self.operators = Operators(self.model, self.decor.get('operators', []))
         if cad:
             fixture = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_carrier')  # not in qpos
@@ -146,8 +152,9 @@ class Views:
         if jitter_seed is not None:  # the real cameras were not calibrated or fixed exactly
             rng = np.random.default_rng(jitter_seed)
             cam = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, 'overhead')
-            m.cam_pos[cam] += rng.uniform(-.02, .02, 3)
-            m.cam_fovy[cam] += rng.uniform(-3, 3)
+            m.cam_pos[cam] += rng.uniform(-.04, .04, 3)
+            m.cam_fovy[cam] += rng.uniform(-4, 4)
+            self.crop_shift = rng.integers(-16, 17, 2)
         self.cameras = {name: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_CAMERA, sim)
                         for name, sim in camera_names.items()}
         for name in ('wrist_port2', 'wrist_port3'):
@@ -177,7 +184,9 @@ class Views:
     def _shape(self, name, image, nearest=False):
         if name == 'overhead':
             x0, y0, x1, y1 = OVERHEAD_CROP
-            return image[y0:y1, x0:x1]
+            dx = int(np.clip(self.crop_shift[0], -x0, image.shape[1] - x1))
+            dy = int(np.clip(self.crop_shift[1], -y0, image.shape[0] - y1))
+            return image[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
         map_x, map_y, inside = self.maps
         warped = cv2.remap(image, map_x, map_y, cv2.INTER_NEAREST if nearest else cv2.INTER_LINEAR,
                            borderMode=cv2.BORDER_CONSTANT, borderValue=-1 if nearest else 0)
@@ -185,15 +194,26 @@ class Views:
         return cv2.resize(warped, (256, 256), interpolation=cv2.INTER_NEAREST if nearest else cv2.INTER_AREA)
 
     def render(self, name, maps=False, unlit=False):
-        """RGB (and depth/ids); `unlit` drops shadows and specular highlights."""
+        """RGB (and depth/ids).
+
+        `unlit` renders flat: every light off and uniform white ambient light, so
+        each surface shows only its own colour. The restyle repaints that, and
+        `transfer_shading` multiplies the scene's full lighting back in.
+        """
         renderer = self.overhead if name == 'overhead' else self.wrist
+        m = self.model
         if unlit:
-            self.model.light_specular[:] = 0
+            saved = (m.light_active.copy(), m.vis.headlight.ambient.copy(), m.vis.headlight.diffuse.copy())
+            m.light_active[:] = 0
+            m.vis.headlight.ambient[:] = 1.
+            m.vis.headlight.diffuse[:] = 0.
         renderer.update_scene(self.data, self.cameras[name], self.options)
+        renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = bool(self.fog) and not unlit
         if unlit:
             renderer.scene.flags[mujoco.mjtRndFlag.mjRND_SHADOW] = False
         rgb = self._shape(name, renderer.render())
-        self.model.light_specular[:] = self.light_specular
+        if unlit:
+            m.light_active[:], m.vis.headlight.ambient[:], m.vis.headlight.diffuse[:] = saved
         if not maps:
             return rgb
         renderer.enable_depth_rendering()
@@ -248,9 +268,13 @@ def apply_appearance(model, look: dict) -> None:
 
 def sample_camera_response(rng) -> dict:
     """Webcam exposure, white balance, gamma, noise and blur for one camera of one episode."""
-    return dict(gain=float(rng.uniform(.8, 1.2)), white=rng.uniform(.92, 1.08, 3).tolist(),
-                gamma=float(rng.uniform(.88, 1.12)), noise=float(rng.uniform(0, 5)),
-                blur=float(rng.uniform(.4, 1.1)) if rng.random() < .3 else 0.)
+    return dict(gain=float(rng.uniform(.75, 1.25)), white=rng.uniform(.9, 1.1, 3).tolist(),
+                gamma=float(rng.uniform(.85, 1.15)), noise=float(rng.uniform(0, 6)),
+                blur=float(rng.uniform(.4, 1.1)) if rng.random() < .3 else 0.,
+                vignette=float(rng.uniform(0, .45)),
+                motion=dict(length=int(rng.integers(3, 8)), angle=float(rng.uniform(0, 180)))
+                if rng.random() < .15 else None,
+                jpeg=int(rng.integers(30, 90)) if rng.random() < .5 else None)
 
 
 def camera_response(frame: np.ndarray, response: dict, rng) -> np.ndarray:
@@ -258,8 +282,22 @@ def camera_response(frame: np.ndarray, response: dict, rng) -> np.ndarray:
     image = np.clip(image * response['gain'] * np.array(response['white']), 0, 1) ** response['gamma']
     if response['blur']:
         image = cv2.GaussianBlur(image, (0, 0), response['blur'])
-    image = image * 255 + rng.normal(0, response['noise'], image.shape)
-    return np.clip(image, 0, 255).astype(np.uint8)
+    if response.get('motion'):
+        n, angle = response['motion']['length'], np.deg2rad(response['motion']['angle'])
+        kernel = np.zeros((n, n), np.float32)
+        c = (n - 1) / 2
+        for t in np.linspace(-c, c, 4 * n):
+            kernel[int(round(c + t * np.sin(angle))), int(round(c + t * np.cos(angle)))] = 1
+        image = cv2.filter2D(image, -1, kernel / kernel.sum())
+    if response.get('vignette'):
+        h, w = image.shape[:2]
+        y, x = np.mgrid[0:h, 0:w]
+        radius = np.hypot((x - w / 2) / (w / 2), (y - h / 2) / (h / 2)) / np.sqrt(2)
+        image = image * (1 - response['vignette'] * radius ** 2)[..., None]
+    image = np.clip(image * 255 + rng.normal(0, response['noise'], image.shape), 0, 255).astype(np.uint8)
+    if response.get('jpeg'):  # cheap webcam compression
+        image = cv2.imdecode(cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, response['jpeg']])[1], 1)
+    return image
 
 
 class OperatorShadows:
@@ -290,9 +328,14 @@ class OperatorShadows:
 
 
 def transfer_shading(restyled: np.ndarray, lit: np.ndarray, unlit: np.ndarray) -> np.ndarray:
-    """Multiply the sim's shadows and highlights (lit / unlit luminance) into a restyled frame."""
-    luminance = lambda x: x.astype(np.float32).mean(-1) + 4
-    ratio = np.clip(luminance(lit) / luminance(unlit), .25, 2.5)[..., None]
+    """Multiply the scene's full lighting into a restyled frame.
+
+    lit / flat, per colour channel, is the light reaching each pixel: brightness,
+    colour cast, direction, shadows and glare. Applied to a restyle of the flat
+    render, every restyled episode keeps its own randomized lighting.
+    """
+    ratio = (lit.astype(np.float32) + 3) / (unlit.astype(np.float32) + 3)
+    ratio = cv2.GaussianBlur(np.clip(ratio, .03, 3.), (0, 0), .7)
     return np.clip(restyled * ratio, 0, 255).astype(np.uint8)
 
 
