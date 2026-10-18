@@ -18,6 +18,30 @@ LEROBOT_COMMIT = "e624f3f7f8411ec3a02635d06e79373341e5ef35"
 CAMERAS = ["observation.images.shoulder", "observation.images.wrist"]
 
 
+def dataset_contract(root):
+    """What this run must train on, from the dataset.
+
+    The original single-arm cube release (1,000 episodes, 900/100 split, two
+    cameras, 7-D, 30 Hz) is the default. A dataset with `meta/pi05_split.json`
+    (tools/build_pi05_bimanual_dataset.py) brings its own cameras, dimensions,
+    frame rate, task and exact episode split.
+    """
+    root = Path(root)
+    split_path = root / "meta/pi05_split.json"
+    if not split_path.is_file():
+        return dict(cameras=CAMERAS, dim=7, fps=30, task="stack the three colored cubes",
+                    train=list(range(900)), validation=list(range(900, 1000)), state_gripper="command")
+    info = json.loads((root / "meta/info.json").read_text())
+    split = json.loads(split_path.read_text())
+    import pyarrow.parquet as pq
+    tasks = pq.read_table(root / "meta/tasks.parquet").to_pandas()
+    task = str(tasks.index[0]) if "task" not in tasks.columns else str(tasks["task"].iloc[0])
+    return dict(cameras=[k for k in info["features"] if k.startswith("observation.images.")],
+                dim=info["features"]["action"]["shape"][0], fps=info["fps"], task=task,
+                train=split["train"], validation=split["validation"],
+                state_gripper="measured gripper angle in radians (0 closed .. 2 open)")
+
+
 def prune_checkpoints(checkpoint, keep):
     """Prune only completed checkpoints created by this wrapper, within this run."""
     if keep < 1:
@@ -80,7 +104,8 @@ def strict_from_pretrained(cls, pretrained_name_or_path, *, config=None, **kwarg
     return model
 
 
-def check_full_model(policy):
+def check_full_model(policy, contract=None):
+    contract = contract or dataset_contract("/nonexistent")
     cfg = policy.config
     if cfg.type != "pi05" or cfg.freeze_vision_encoder or cfg.train_expert_only:
         raise ValueError("This run requires pi05 with vision and VLM fully unfrozen")
@@ -89,15 +114,16 @@ def check_full_model(policy):
     frozen = [n for n, p in policy.named_parameters() if not p.requires_grad]
     if frozen:
         raise ValueError(f"Frozen parameters: {frozen[:20]}")
-    if list(cfg.image_features) != CAMERAS:
+    if list(cfg.image_features) != contract["cameras"]:
         raise ValueError(f"Camera contract mismatch: {list(cfg.image_features)}")
-    if cfg.output_features["action"].shape != (7,) or cfg.input_features["observation.state"].shape != (7,):
-        raise ValueError("Expected seven-dimensional state and absolute joint/gripper actions")
+    dim = (contract["dim"],)
+    if cfg.output_features["action"].shape != dim or cfg.input_features["observation.state"].shape != dim:
+        raise ValueError(f"Expected {dim[0]}-dimensional state and absolute joint/gripper actions")
     if cfg.use_relative_actions:
         raise ValueError("This dataset already contains the required absolute controls")
     return {"parameters": sum(p.numel() for p in policy.parameters()),
             "trainable_parameters": sum(p.numel() for p in policy.parameters() if p.requires_grad),
-            "frozen_parameters": 0, "cameras": CAMERAS}
+            "frozen_parameters": 0, "cameras": contract["cameras"]}
 
 
 def install_guards():
@@ -129,16 +155,19 @@ def install_guards():
         if cfg.accelerator.gradient_accumulation.steps != 1:
             raise ValueError("This notebook counts optimizer steps; keep accumulation at 1")
         train, val = original_datasets(cfg)
-        expected_train = list(range(900))
-        if train.episodes != expected_train or val is None or val.episodes != list(range(900, 1000)):
-            raise ValueError("Expected episodes 0:900 train, 900:1000 validation")
+        contract = dataset_contract(cfg.dataset.root)
+        expected_train = contract["train"]
+        if train.episodes != expected_train or val is None or val.episodes != contract["validation"]:
+            raise ValueError(f"Expected episodes {expected_train[0]}:{expected_train[-1] + 1} train and "
+                             f"{contract['validation'][0]}:{contract['validation'][-1] + 1} validation; "
+                             "check --dataset.eval_split against meta/pi05_split.json")
         # Compute exact numerical quantiles ONLY on train episodes. Image stats
         # are unused because VISUAL uses IDENTITY normalization.
         import pyarrow.parquet as pq
         numeric = {key: [] for key in ("observation.state", "action")}
         for path in sorted((Path(cfg.dataset.root) / "data").rglob("*.parquet")):
             table = pq.read_table(path, columns=["episode_index", *numeric])
-            mask = table["episode_index"].to_numpy() < 900
+            mask = np.isin(table["episode_index"].to_numpy(), expected_train)
             if mask.any():
                 for key in numeric:
                     numeric[key].append(np.asarray(table[key].to_pylist(), dtype=np.float32)[mask])
@@ -157,9 +186,9 @@ def install_guards():
         from sim.dynamics import provenance_dynamics
         provenance_path = Path(cfg.dataset.root) / "meta/provenance.json"
         provenance = json.loads(provenance_path.read_text()) if provenance_path.exists() else {}
-        run_state.update(cfg=cfg, output=output, dynamics=provenance_dynamics(provenance))
+        run_state.update(cfg=cfg, output=output, dynamics=provenance_dynamics(provenance), contract=contract)
         (output / "episode_split.json").write_text(json.dumps({
-            "train": expected_train, "validation": list(range(900, 1000)),
+            "train": expected_train, "validation": contract["validation"],
             "normalization_episodes": expected_train}, indent=2))
         (output / "training_stats.json").write_text(json.dumps(
             {k: {s: v.tolist() for s, v in fields.items()} for k, fields in stats.items()}, indent=2))
@@ -175,7 +204,7 @@ def install_guards():
         return original_processors(*args, **kwargs)
 
     def optimizer(cfg, policy):
-        report = check_full_model(policy)
+        report = check_full_model(policy, run_state["contract"])
         opt, schedule = original_optimizer(cfg, policy)
         covered = {id(p) for g in opt.param_groups for p in g["params"]}
         if covered != {id(p) for p in policy.parameters()}:
@@ -233,8 +262,9 @@ def install_guards():
         original_save(*args, **kwargs)
         (checkpoint / "pretrained_model/deployment.json").write_text(json.dumps({
             "simulation_dynamics": run_state["dynamics"],
-            "fps": 30, "action_representation": "absolute", "action_alignment": "next_uniform_sample",
-            "state_gripper": "command", "cameras": CAMERAS, "task": "stack the three colored cubes",
+            "fps": run_state["contract"]["fps"], "action_representation": "absolute",
+            "action_alignment": "next_uniform_sample", "state_gripper": run_state["contract"]["state_gripper"],
+            "cameras": run_state["contract"]["cameras"], "task": run_state["contract"]["task"],
             "success_hold_seconds": 1.0, "dataset_repo": run_state["cfg"].dataset.repo_id,
             "dataset_revision": run_state["cfg"].dataset.revision, "lerobot_commit": LEROBOT_COMMIT}, indent=2))
         (checkpoint / "PI05_COMPLETE").write_text("Model, processors, optimizer and deployment contract saved.\n")
