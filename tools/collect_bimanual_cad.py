@@ -197,7 +197,10 @@ def attempt(seed, speed=1.):
     state[:, [6, 13]] = opening_to_rad(state[:, [6, 13]])  # metres -> real radians
     arrays = dict(qpos=qpos, state=state.astype(np.float32),
                   velocity=np.asarray(trial.velocities)[start:].astype(np.float32),
-                  effort=np.asarray(trial.efforts)[start:].astype(np.float32))
+                  effort=np.asarray(trial.efforts)[start:].astype(np.float32),
+                  # Commanded joints and gripper openings (m): a closed gripper stalled on a part
+                  # is commanded shut while its measured opening stays at the part's width.
+                  command=np.asarray(trial.actions)[start:].astype(np.float32))
     stages = [dict(name=st['name'], arm=st['arm'], start=st['frame'] - start)
               for st in trial.stages if st['frame'] >= start]
     rng = np.random.default_rng(seed)
