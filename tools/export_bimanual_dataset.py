@@ -39,6 +39,7 @@ are pasted back from the render. Check the look first with `preview`:
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import multiprocessing
 import os
@@ -363,6 +364,7 @@ def real_style_bank(files: int = 3, per_camera: int = 24, cache: Path = ROOT / '
 def restyle_settings(args):
     from tools.sim2real_augment import Settings
     return Settings(batch=args.restyle_batch, steps=args.restyle_steps, strength=args.restyle_strength,
+                    size=args.restyle_size,
                     guidance=args.restyle_guidance, depth_scale=args.restyle_depth, canny_scale=args.restyle_canny,
                     ip_scale=args.restyle_ip, prompts=PROMPTS, negative=NEGATIVE)
 
@@ -427,7 +429,8 @@ def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, sett
             cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                         [cv2.IMWRITE_JPEG_QUALITY, 92])
     if restyle_seed is not None:
-        report.update(restyle_seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)])
+        report.update(restyle_seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)],
+                      restyle_settings={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     (dest / 'look.json').write_text(json.dumps(report, indent=2) + '\n')
     return len(qpos), report
 
@@ -507,8 +510,20 @@ def export(args):
                     restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     args.rendered.mkdir(parents=True, exist_ok=True)
     contract_path = args.rendered / 'settings.json'
-    if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
-        raise SystemExit(f'{args.rendered} was rendered with other settings; use a fresh --rendered path')
+    if contract_path.exists():
+        previous = json.loads(contract_path.read_text())
+        restyle_keys = ('restyle', 'restyle_fraction')
+        same_scene = all(previous.get(k) == v for k, v in json.loads(json.dumps(contract)).items()
+                         if k not in restyle_keys + ('history',))
+        if not same_scene or (any(previous.get(k) != json.loads(json.dumps(contract))[k] for k in restyle_keys)
+                              and not args.allow_restyle_change):
+            raise SystemExit(f'{args.rendered} was rendered with other settings; use a fresh --rendered path'
+                             + ('' if not same_scene else ' (or --allow-restyle-change to keep finished episodes '
+                                'and restyle the rest with the new settings)'))
+        # Finished episodes keep the restyle they had; each records its own settings in look.json.
+        contract['history'] = previous.get('history', []) + (
+            [{k: previous[k] for k in restyle_keys}] if any(previous.get(k) != contract[k] for k in restyle_keys)
+            else [])
     contract_path.write_text(json.dumps(contract, indent=2) + '\n')
 
     dests = [args.rendered / f'{source.name}_c{copy}' for source, copy in items]
@@ -639,6 +654,7 @@ def main():
                              'fitted to the Oct 5 real data)')
     common.add_argument('--restyle-batch', type=int, default=8)
     common.add_argument('--restyle-steps', type=int, default=8)
+    common.add_argument('--restyle-size', type=int, default=512, help='diffusion resolution (output is 256 px)')
     common.add_argument('--restyle-strength', type=float, default=.9)
     common.add_argument('--restyle-guidance', type=float, default=1.5)
     common.add_argument('--restyle-depth', type=float, default=.75, help='depth ControlNet scale')
@@ -654,6 +670,8 @@ def main():
     p.add_argument('--restyle-fraction', type=float, default=0.)
     p.add_argument('--restyle-seed', type=int, default=0)
     p.add_argument('--keep-jpegs', action='store_true', help='keep the rendered JPEGs after writing the dataset')
+    p.add_argument('--allow-restyle-change', action='store_true',
+                   help='resume with different restyle settings or share; finished episodes are kept as they are')
     p.add_argument('--action', choices=('measured', 'commanded', 'commanded-gripper'), default='measured',
                    help='labels: next measured state (as the real data), the commands, or commanded grippers only')
     p = sub.add_parser('preview', parents=[common])
