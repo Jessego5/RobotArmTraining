@@ -46,10 +46,17 @@ DEPTH_MODEL = 'depth-anything/Depth-Anything-V2-Small-hf'
 SCENES = ('a light maple butcher-block table in a university lab', 'a dark walnut wooden desk in a home office',
           'a white laminate workbench in a bright clean room', 'a grey steel workbench in a machine shop',
           'a black rubber mat on a workshop table', 'a pale plywood table in a cluttered garage',
-          'a green cutting mat on a lab bench', 'a polished concrete counter in a warehouse')
+          'a green cutting mat on a lab bench', 'a polished concrete counter in a warehouse',
+          'a blue anti-static mat on an electronics bench', 'a white marble countertop in a kitchen',
+          'a red-painted metal table in a factory', 'a cork board surface in a classroom',
+          'a glossy black desk in a dark office', 'a stainless steel table in a clean lab',
+          'a scratched old wooden workbench in a basement', 'a beige plastic folding table in a hallway',
+          'a dark grey felt mat on an office desk', 'a yellow-orange workbench in a makerspace')
 LIGHTS = ('bright fluorescent ceiling light', 'warm tungsten lamp light, soft shadows',
           'cool overcast daylight from a window', 'harsh afternoon sunlight, long shadows',
-          'dim evening light, a single desk lamp', 'even studio lighting')
+          'dim evening light, a single desk lamp', 'even studio lighting', 'blue-tinted LED panel light',
+          'golden hour sunlight through blinds, striped shadows', 'low light, mostly in shadow',
+          'strong side light from a window, high contrast')
 ROBOT = ('two white and grey aluminium robot arms with white 3D printed fin-ray gripper fingers and black brackets, '
          'assembling a small black gear and a steel pin into a silver machined carrier')
 NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, text, watermark, extra robot arms, extra hands, '
@@ -142,13 +149,86 @@ class Depth:
         return np.stack(out)
 
 
-def controls(frames_rgb, disparity):
-    """Depth control (near = bright, scaled per episode so it does not pulse) and image edges."""
+def controls(frames_rgb, disparity, keep=None):
+    """Depth control (near = bright, scaled per episode so it does not pulse) and image edges.
+
+    With `keep`, edges are limited to the kept objects and their outlines, so the table
+    grain and the room do not pin the repaint to the original surface.
+    """
     lo, hi = np.percentile(disparity, [1, 99])
     depth = np.clip((disparity - lo) / max(hi - lo, 1e-6), 0, 1)
     depth_images = np.repeat((depth * 255).astype(np.uint8)[..., None], 3, -1)
-    edges = [cv2.Canny(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), 80, 160) for f in frames_rgb]
+    edges = []
+    for i, f in enumerate(frames_rgb):
+        e = cv2.Canny(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), 80, 160)
+        if keep is not None:
+            near = cv2.dilate(keep[i].astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+            e = np.where(near, e, 0).astype(np.uint8)
+        edges.append(e)
     return depth_images, np.repeat(np.stack(edges)[..., None], 3, -1)
+
+
+def sample_lighting(seed: int) -> dict:
+    """One episode's whole-frame lighting change, robot included."""
+    rng = np.random.default_rng(seed)
+    cast = rng.choice(['neutral', 'warm', 'cool', 'green', 'blue', 'neutral'])
+    tint = {'neutral': [1, 1, 1], 'warm': [1.18, 1.0, .78], 'cool': [.85, .97, 1.18],
+            'green': [.9, 1.12, .9], 'blue': [.8, .92, 1.25]}[cast]
+    return dict(gain=float(rng.uniform(.55, 1.35)), gamma=float(rng.uniform(.8, 1.3)),
+                tint=(np.array(tint) * rng.uniform(.95, 1.05, 3)).tolist(), cast=str(cast),
+                light_azimuth=float(rng.uniform(0, 360)), light_elevation=float(rng.uniform(15, 70)),
+                shading=float(rng.uniform(.15, .55)),
+                gradient=float(rng.uniform(0, .45)), gradient_angle=float(rng.uniform(0, 360)),
+                vignette=float(rng.uniform(0, .45)), shadows=int(rng.integers(0, 3)),
+                shadow_seed=int(rng.integers(2**31)), cast_shadow=float(rng.uniform(.3, .6)))
+
+
+def relight(frames_rgb, disparity, look: dict, keep=None):
+    """Apply one episode's lighting to every frame: directional shading from the estimated
+    depth, shadows cast by the kept objects onto the table away from the light, a light
+    falloff across the frame, colour cast, exposure and drifting soft shadows."""
+    count, height, width = disparity.shape
+    az, el = np.radians(look['light_azimuth']), np.radians(look['light_elevation'])
+    light = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32)
+    ga = np.radians(look['gradient_angle'])
+    ramp = ((x - width / 2) * np.cos(ga) + (y - height / 2) * np.sin(ga)) / (width / 2)
+    gradient = 1 + look['gradient'] * np.clip(ramp, -1, 1)
+    radius = np.hypot((x - width / 2) / (width / 2), (y - height / 2) / (height / 2)) / np.sqrt(2)
+    vignette = 1 - look['vignette'] * radius ** 2
+    rng = np.random.default_rng(look['shadow_seed'])
+    blobs = []
+    for _ in range(look['shadows']):
+        keys = max(2, count // 60)
+        points = rng.uniform(-.1, 1.1, (keys, 2)) * [width, height]
+        path = np.stack([np.interp(np.linspace(0, keys - 1, count), np.arange(keys), points[:, k]) for k in range(2)], 1)
+        blobs.append((path, rng.uniform([30, 12], [110, 45]), rng.uniform(0, 180), rng.uniform(.3, .6)))
+    lo, hi = np.percentile(disparity, [1, 99])
+    out = np.empty_like(frames_rgb)
+    for i, (frame, d) in enumerate(zip(frames_rgb, disparity)):
+        d = cv2.GaussianBlur(((d - lo) / max(hi - lo, 1e-6)).astype(np.float32), (0, 0), 5)
+        gx, gy = cv2.Sobel(d, cv2.CV_32F, 1, 0, ksize=5), cv2.Sobel(d, cv2.CV_32F, 0, 1, ksize=5)
+        normal = np.dstack([-gx * 4, -gy * 4, np.ones_like(d)])
+        normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+        lambert = np.clip(normal @ light, 0, 1)
+        shade = 1 - look['shading'] + look['shading'] * 1.25 * lambert
+        shadow = np.zeros((height, width), np.float32)
+        for path, axes, angle, darkness in blobs:
+            cv2.ellipse(shadow, tuple(int(v) for v in path[i]), tuple(int(a) for a in axes), angle, 0, 360, darkness, -1)
+        if blobs:
+            shadow = cv2.GaussianBlur(shadow, (0, 0), 18)
+        if keep is not None and look.get('cast_shadow'):
+            # The repaint removed the real shadows on the table: cast the arms, parts and hands
+            # onto it, away from the new light, longer when the light is low.
+            reach = min(60., 18. / max(np.tan(el), .25))
+            shift = np.float32([[1, 0, -np.cos(az) * reach], [0, 1, np.sin(az) * reach]])
+            caster = cv2.warpAffine(keep[i].astype(np.float32), shift, (width, height))
+            cast = cv2.GaussianBlur(caster, (0, 0), 3 + reach / 8) * look['cast_shadow']
+            shadow = np.maximum(shadow, np.where(keep[i], 0, cast))
+        factor = (shade * gradient * vignette * (1 - np.clip(shadow, 0, .7)))[..., None] * look['gain']
+        image = np.clip(frame.astype(np.float32) / 255 * factor * np.array(look['tint']), 0, 1) ** look['gamma']
+        out[i] = (image * 255).astype(np.uint8)
+    return out
 
 
 # ---------------------------------------------------------------- data ------
@@ -215,7 +295,7 @@ def restyle_settings(args):
                     prompts=prompts(), negative=NEGATIVE)
 
 
-def render_job(root, dest, episode, restyle_seed, settings):
+def render_job(root, dest, episode, restyle_seed, settings, args_relight=True):
     """Write one output episode's JPEGs (original bytes, or restyled) and its image stats."""
     import pickle
     from lerobot.datasets.compute_stats import compute_episode_stats
@@ -238,7 +318,11 @@ def render_job(root, dest, episode, restyle_seed, settings):
         disparity = depth_model(frames)
         keep = np.stack([keep_mask(cv2.cvtColor(f, cv2.COLOR_RGB2BGR), d) for f, d in zip(frames, disparity)])
         restyled = restyler.episode(frames, None, None, keep, restyle_seed, camera, ~keep,
-                                    controls=controls(frames, disparity))
+                                    controls=controls(frames, disparity, keep))
+        if args_relight:
+            look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
+            restyled = relight(restyled, disparity, look, keep)
+            report['lighting'] = look
         report[f'{camera}_kept_share'] = float(keep.mean())
         for i, frame in enumerate(restyled):
             cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
@@ -269,7 +353,7 @@ def export(args):
     settings = restyle_settings(args)
     args.work.mkdir(parents=True, exist_ok=True)
     contract = dict(source=REAL, revision=revision, items=items,
-                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight)
     contract_path = args.work / 'settings.json'
     if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
         raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
@@ -280,7 +364,8 @@ def export(args):
           f'({len(restyled)} restyled copies)', flush=True)
     started = time.time()
     with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
-        futures = {pool.submit(render_job, args.root, dests[i], items[i][0], items[i][1], settings): i for i in todo}
+        futures = {pool.submit(render_job, args.root, dests[i], items[i][0], items[i][1], settings, args.relight): i
+                   for i in todo}
         for k, future in enumerate(as_completed(futures), 1):
             future.result()
             elapsed = time.time() - started
@@ -346,14 +431,15 @@ def preview(args):
             columns = [frames, shown]
             if restyler is not None:
                 restyler.settings = replace(settings, carry_static=False)
-                columns.append(restyler.episode(frames, None, None, keep, args.seed + k, camera, ~keep,
-                                                controls=controls(frames, disparity)))
+                restyled = restyler.episode(frames, None, None, keep, args.seed + k, camera, ~keep,
+                                            controls=controls(frames, disparity, keep))
+                columns += [restyled, relight(restyled, disparity, sample_lighting(args.seed + k), keep)]
             for i in range(len(frames)):
                 rows.append(np.concatenate([c[i] for c in columns], 1))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
     print(f'wrote {args.output} (revision {revision[:8]}): columns original, kept (blue = repainted)'
-          + ('' if restyler is None else ', restyled'))
+          + ('' if restyler is None else ', restyled, restyled + relit'))
 
 
 def main():
@@ -366,15 +452,17 @@ def main():
     common.add_argument('--batch', type=int, default=8)
     common.add_argument('--steps', type=int, default=4)
     common.add_argument('--size', type=int, default=384, help='diffusion resolution (frames are 256 px)')
-    common.add_argument('--strength', type=float, default=.85)
+    common.add_argument('--strength', type=float, default=.95)
     common.add_argument('--guidance', type=float, default=1.)
-    common.add_argument('--depth-scale', type=float, default=.7)
-    common.add_argument('--canny-scale', type=float, default=.5)
+    common.add_argument('--depth-scale', type=float, default=.6)
+    common.add_argument('--canny-scale', type=float, default=.6)
     p = sub.add_parser('export', parents=[common])
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--work', type=Path, required=True, help='per-episode render folders (resumable)')
     p.add_argument('--fraction', type=float, default=.5, help='share of episodes that get a restyled copy')
     p.add_argument('--no-originals', dest='include_originals', action='store_false')
+    p.add_argument('--no-relight', dest='relight', action='store_false',
+                   help='skip the whole-frame lighting change on restyled copies')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--limit', type=int)
     p.add_argument('--keep-jpegs', action='store_true')
