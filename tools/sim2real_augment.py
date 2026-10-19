@@ -167,8 +167,13 @@ class Restyler:
         self.torch = torch
 
     def episode(self, rgb: np.ndarray, depth: np.ndarray, segment: np.ndarray, keep: np.ndarray,
-                seed: int, camera: str, background: np.ndarray | None = None, reference=None) -> np.ndarray:
-        """Restyle one camera's frames of one episode; `keep` marks pixels copied back."""
+                seed: int, camera: str, background: np.ndarray | None = None, reference=None,
+                controls: tuple | None = None) -> np.ndarray:
+        """Restyle one camera's frames of one episode; `keep` marks pixels copied back.
+
+        `controls` = (depth images, edge images), uint8 HxWx3 per frame, replaces the
+        simulator's depth and segmentation outlines (for real footage).
+        """
         from PIL import Image
 
         s, torch = self.settings, self.torch
@@ -190,9 +195,14 @@ class Restyler:
             init = [Image.fromarray(cv2.resize(f, size, interpolation=cv2.INTER_CUBIC)) for f in frames]
             # Multi-ControlNet takes one batched tensor per conditioning, not nested lists.
             as_batch = lambda images: torch.from_numpy(np.stack(images)).permute(0, 3, 1, 2).float() / 255
-            depth_control = as_batch([cv2.resize(depth_image(d, s, camera), size) for d in depth[chunk]])
-            edge_control = as_batch([cv2.resize(boundary_image(g), size, interpolation=cv2.INTER_NEAREST)
-                                     for g in segment[chunk]])
+            if controls is not None:
+                depth_control = as_batch([cv2.resize(d, size) for d in controls[0][chunk]])
+                edge_control = as_batch([cv2.resize(e, size, interpolation=cv2.INTER_NEAREST)
+                                         for e in controls[1][chunk]])
+            else:
+                depth_control = as_batch([cv2.resize(depth_image(d, s, camera), size) for d in depth[chunk]])
+                edge_control = as_batch([cv2.resize(boundary_image(g), size, interpolation=cv2.INTER_NEAREST)
+                                         for g in segment[chunk]])
             # The same noise for every frame of the episode limits flicker.
             generators = [torch.Generator('cpu').manual_seed(seed) for _ in range(count)]
             images = self.pipe(prompt=[prompt] * count, negative_prompt=[s.negative] * count,
