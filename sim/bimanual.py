@@ -46,8 +46,13 @@ OVERHEAD_SETUPS = {
     # Aimed so the real meeting point (0.25, 0, 0.03) projects to that row.
     'before_oct2': dict(pos=(-.60, 0., 1.10), target=(.83, 0., 0.), fovy=38.),
     'after_oct2': dict(pos=(-.80, 0., 1.00), target=(.85, 0., .10), fovy=35.),
+    # Fitted (outputs/fit_camera.py): 16 frames from the Oct 5 real data (original camera
+    # setup restored), sim arms posed from the recorded joint angles, camera pose, roll
+    # and field of view searched to overlap the real arms. Overlap (IoU) 0.46, against
+    # 0.06 and 0.01 for the two hand-placed guesses above.
+    'original': dict(pos=(-.434, -.054, 1.216), target=(.886, -.002, 0.), fovy=35.5, roll=-3.2),
 }
-OVERHEAD = OVERHEAD_SETUPS['after_oct2']
+OVERHEAD = OVERHEAD_SETUPS['original']
 # Lights, estimated from the real overhead frames: two steady glare spots on the
 # varnished table, reflected back through the estimated camera to a ceiling ~1.9 m
 # above the table, put two fixtures about 3 m ahead of the bases. A dimmer fixture
@@ -132,14 +137,19 @@ def _add_parts(world):
     pin.add_site(name='pin_tip', pos=[0, 0, -PIN_HALF - PIN_RADIUS], size=[.002], group=4)
 
 
-def _look_at(pos, target) -> list[float]:
-    """Camera quaternion looking from pos to target with image-right along -y."""
+def _look_at(pos, target, roll: float = 0.) -> list[float]:
+    """Camera quaternion looking from pos to target with image-right along -y, rolled `roll` degrees."""
     forward = np.subtract(target, pos, dtype=float)
     forward /= np.linalg.norm(forward)
     right = np.array([0., -1., 0.])
     up = np.cross(-forward, right)
     quat = np.zeros(4)
     mujoco.mju_mat2Quat(quat, np.stack([right, up, -forward], axis=1).ravel())
+    if roll:
+        turn, rolled = np.zeros(4), np.zeros(4)
+        mujoco.mju_axisAngle2Quat(turn, np.array([0, 0, 1.]), np.radians(roll))
+        mujoco.mju_mulQuat(rolled, quat, turn)
+        quat = rolled
     return quat.tolist()
 
 
@@ -173,7 +183,7 @@ def build_spec(overhead: dict = OVERHEAD, parts: bool = True) -> mujoco.MjSpec:
                    size=[TABLE_SIZE[0] / 2, TABLE_SIZE[1] / 2, .02], material='table',
                    friction=[.4, .02, .0005])
     world.add_camera(name='overhead', pos=list(overhead['pos']), fovy=overhead['fovy'],
-                     quat=_look_at(overhead['pos'], overhead['target']))
+                     quat=_look_at(overhead['pos'], overhead['target'], overhead.get('roll', 0.)))
     if parts:
         _add_parts(world)
 

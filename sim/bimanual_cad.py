@@ -144,7 +144,7 @@ def build_scene(overhead_setup: str = 'after_oct2') -> str:
                       dir=_vec(direction / np.linalg.norm(direction)), type='spot', cutoff='80',
                       castshadow='true', diffuse=_vec(light['diffuse']), specular=_vec(light['specular']),
                       bulbradius='.15')
-    quat = _look_at(np.add(overhead['pos'], lift), np.add(overhead['target'], lift))
+    quat = _look_at(np.add(overhead['pos'], lift), np.add(overhead['target'], lift), overhead.get('roll', 0.))
     ET.SubElement(world, 'camera', name='overhead', pos=_vec(np.add(overhead['pos'], lift)),
                   quat=_vec(quat), fovy=str(overhead['fovy']))
     visual = root.find('visual')

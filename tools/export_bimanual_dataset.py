@@ -378,14 +378,15 @@ def episode_look(meta: dict, copy: int, operator_share: float) -> dict:
                 decor_seed=int(rng.integers(2**31)))
 
 
-def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, settings=None):
+def render_episode(source: Path, dest: Path, look: dict, restyle_seed=None, settings=None, overhead=None):
     """Write JPEGs per camera, augmented and optionally restyled. Returns (frames, report)."""
     meta = json.loads((source / 'meta.json').read_text())
     with np.load(source / 'data.npz') as data:
         qpos = data['qpos']
-    views = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919 * look['copy'],
+    setup = overhead or meta['overhead_setup']
+    views = Views(setup, jitter_seed=meta['seed'] + 7919 * look['copy'],
                   appearance=look.get('appearance'), meta=meta, decor_seed=look.get('decor_seed'))
-    report = dict(source=source.name, overhead_setup=meta['overhead_setup'], decor=views.decor, **look)
+    report = dict(source=source.name, overhead_setup=setup, decor=views.decor, **look)
     global restyler, bank
     for camera in CAMERAS:
         lit, unlit, depth, ids = [], [], [], []
@@ -465,13 +466,13 @@ def episode_actions(data, action: str = 'measured') -> np.ndarray:
     return measured
 
 
-def render_job(source, dest, look, restyle_seed, settings):
+def render_job(source, dest, look, restyle_seed, settings, overhead=None):
     """Render one (episode, copy) into `dest`; `done.json` marks it finished for resuming."""
     import pickle
     from lerobot.datasets.compute_stats import compute_episode_stats
     shutil.rmtree(dest, ignore_errors=True)  # a half-rendered folder from an interrupted run
     dest.mkdir(parents=True)
-    count, report = render_episode(source, dest, look, restyle_seed, settings)
+    count, report = render_episode(source, dest, look, restyle_seed, settings, overhead)
     image_features = {k: v for k, v in features().items() if v['dtype'] == 'image'}
     buffer = {key: [str(dest / key.rsplit('.', 1)[-1] / f'{j:05d}.jpg') for j in range(count - 1)]
               for key in image_features}
@@ -502,7 +503,7 @@ def export(args):
     settings = restyle_settings(args)
     contract = dict(episodes=str(args.episodes.resolve()), count=len(items), copies=args.copies,
                     operator_shadows=args.operator_shadows, restyle_fraction=args.restyle_fraction,
-                    restyle_seed=args.restyle_seed,
+                    restyle_seed=args.restyle_seed, overhead_setup=args.overhead_setup,
                     restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     args.rendered.mkdir(parents=True, exist_ok=True)
     contract_path = args.rendered / 'settings.json'
@@ -521,7 +522,7 @@ def export(args):
             seed = (args.restyle_seed * 100003 + i
                     if np.random.default_rng([args.restyle_seed, i]).random() < args.restyle_fraction else None)
             look = episode_look(json.loads((source / 'meta.json').read_text()), copy, args.operator_shadows)
-            futures[pool.submit(render_job, source, dests[i], look, seed, settings)] = i
+            futures[pool.submit(render_job, source, dests[i], look, seed, settings, args.overhead_setup)] = i
         from concurrent.futures import as_completed
         for k, future in enumerate(as_completed(futures), 1):
             future.result()
@@ -590,8 +591,9 @@ def preview(args):
         frames = np.linspace(0, len(data['qpos']) - 1, args.frames + 2)[1:-1].astype(int)
         qpos = data['qpos'][frames]
     look = episode_look(meta, 1 + args.seed, 1.)
-    base = Views(meta['overhead_setup'], jitter_seed=meta['seed'], meta=meta)
-    varied = Views(meta['overhead_setup'], jitter_seed=meta['seed'] + 7919, appearance=look['appearance'], meta=meta,
+    setup = args.overhead_setup or meta['overhead_setup']
+    base = Views(setup, jitter_seed=meta['seed'], meta=meta)
+    varied = Views(setup, jitter_seed=meta['seed'] + 7919, appearance=look['appearance'], meta=meta,
                    decor_seed=look['decor_seed'])
     bank = real_style_bank()
     settings = restyle_settings(args)
@@ -632,6 +634,9 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('--episodes', type=Path, default=ROOT / 'data/bimanual')
+    common.add_argument('--overhead-setup', choices=sorted(OVERHEAD_SETUPS),
+                        help="overhead camera for every episode (default: each episode's own; 'original' is "
+                             'fitted to the Oct 5 real data)')
     common.add_argument('--restyle-batch', type=int, default=8)
     common.add_argument('--restyle-steps', type=int, default=8)
     common.add_argument('--restyle-strength', type=float, default=.9)
