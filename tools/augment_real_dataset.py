@@ -108,7 +108,7 @@ def keep_mask(image_bgr, disparity, margin=.06):
     lo, hi = np.percentile(disparity, [1, 99])
     disparity = (disparity - lo) / max(hi - lo, 1e-6)
     hsv = cv2.cvtColor(cv2.GaussianBlur(image_bgr, (5, 5), 0), cv2.COLOR_BGR2HSV)
-    bright = cv2.dilate(((hsv[..., 2] > 205) & (hsv[..., 1] < 60)).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    bright = cv2.dilate(((hsv[..., 2] > 235) & (hsv[..., 1] < 45)).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     table = table_colour(image_bgr)
     if table.sum() < 200:  # no visible table: keep everything rather than guess
         return np.ones(disparity.shape, bool)
@@ -121,10 +121,14 @@ def keep_mask(image_bgr, disparity, margin=.06):
     keep = cv2.morphologyEx(keep, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     keep = cv2.morphologyEx(keep, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
     count, labels, stats, _ = cv2.connectedComponentsWithStats(keep)
-    for i in range(1, count):  # small patches that do not rise from the table: grain or glare edges
+    lightness = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+    for i in range(1, count):  # small patches that do not rise from the table: grain or glare edges...
         part = labels == i
         if stats[i, 4] < 250 and np.median(residual[part]) < margin:
-            keep[part] = 0
+            ring = cv2.dilate(part.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool) & ~part
+            # ...unless they stand out from the table around them, like the pin lying on it.
+            if abs(lightness[part].mean() - lightness[ring].mean()) < 25:
+                keep[part] = 0
     keep = cv2.dilate(keep, np.ones((3, 3), np.uint8))
     # Small parts (the pin, the loose gear) get a wider margin: a restyle bleeding a few
     # pixels into them changes what they look like.
