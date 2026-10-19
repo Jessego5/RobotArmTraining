@@ -118,7 +118,12 @@ def keep_mask(image_bgr, disparity, margin=.06):
         part = labels == i
         if stats[i, 4] < 250 and np.median(residual[part]) < margin:
             keep[part] = 0
-    return cv2.dilate(keep, np.ones((3, 3), np.uint8)).astype(bool)
+    keep = cv2.dilate(keep, np.ones((3, 3), np.uint8))
+    # Small parts (the pin, the loose gear) get a wider margin: a restyle bleeding a few
+    # pixels into them changes what they look like.
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(keep)
+    small = np.isin(labels, [i for i in range(1, count) if stats[i, 4] < 600])
+    return (keep.astype(bool) | cv2.dilate(small.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool))
 
 
 class Depth:
