@@ -63,8 +63,64 @@ NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, text, watermark, e
             'distorted hands, extra gears')
 
 
-def prompts():
-    return tuple(f'a webcam photo of {ROBOT} on {scene}, {light}' for scene in SCENES for light in LIGHTS)
+# Most restyled episodes stay plausible (muted, everyday surfaces); some are wild, which
+# teaches the policy that the background does not matter.
+REALISTIC_SHARE = .7
+REALISTIC_PALETTES = ('grey and white', 'light wood', 'dark wood', 'charcoal black', 'beige and cream',
+                      'cool grey', 'brown and tan', 'off-white')
+WILD_PALETTES = ('teal and white', 'deep blue', 'forest green', 'warm red', 'pastel pink', 'navy and orange',
+                 'purple', 'mustard yellow', 'neon blue')
+
+
+def prompts(realistic: bool = True):
+    palettes = REALISTIC_PALETTES if realistic else WILD_PALETTES
+    return tuple(f'a webcam photo of {ROBOT} on {scene}, {palette} colour scheme, {light}'
+                 for scene in SCENES for light in LIGHTS for palette in palettes)
+
+
+def is_realistic(seed: int) -> bool:
+    return bool(np.random.default_rng([seed, 7]).random() < REALISTIC_SHARE)
+
+
+def scramble_background(frames_rgb, keep, seed: int):
+    """Replace the table and room with a random colour field or texture (one per episode),
+    so the restyle starts from a new palette instead of the original wood."""
+    rng = np.random.default_rng(seed)
+    count, height, width = keep.shape
+    y, x = np.mgrid[0:height, 0:width].astype(np.float32) / max(height, width)
+    hsv = lambda h, s, v: cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2RGB)[0, 0].astype(np.float32)
+    if is_realistic(seed):
+        # Everyday surfaces: neutral greys/whites/blacks, or wood and desk tones.
+        if rng.random() < .5:
+            first = hsv(rng.integers(0, 180), rng.integers(0, 25), rng.integers(30, 235))
+        else:
+            first = hsv(rng.integers(8, 22), rng.integers(40, 150), rng.integers(50, 220))
+        second = np.clip(first * rng.uniform(.75, 1.15), 0, 255)
+        kind = str(rng.choice(['solid', 'gradient', 'planks', 'blotches']))
+    else:
+        first = hsv(rng.integers(0, 180), rng.integers(0, 230), rng.integers(25, 245))
+        second = hsv(rng.integers(0, 180), rng.integers(0, 230), rng.integers(25, 245))
+        kind = str(rng.choice(['solid', 'gradient', 'planks', 'tiles', 'blotches']))
+    angle = rng.uniform(0, np.pi)
+    u = x * np.cos(angle) + y * np.sin(angle)
+    if kind == 'solid':
+        weight = np.zeros_like(x)
+    elif kind == 'gradient':
+        weight = (u - u.min()) / max(np.ptp(u), 1e-6)
+    elif kind == 'planks':
+        weight = (np.floor(u * rng.uniform(6, 20)) % 2) * .6 + .2 * np.sin(u * rng.uniform(40, 120)) ** 2
+    elif kind == 'tiles':
+        n = rng.uniform(4, 12)
+        weight = ((np.floor(x * n) + np.floor(y * n)) % 2) * .8
+    else:
+        noise = cv2.resize(rng.random((8, 8)).astype(np.float32), (width, height), interpolation=cv2.INTER_CUBIC)
+        weight = np.clip(noise, 0, 1)
+    texture = first * (1 - weight[..., None]) + second * weight[..., None]
+    texture += rng.normal(0, 6, texture.shape)
+    texture = np.clip(texture, 0, 255).astype(np.uint8)
+    out = frames_rgb.copy()
+    out[~keep] = np.broadcast_to(texture, frames_rgb.shape)[~keep]
+    return out, f"{'realistic' if is_realistic(seed) else 'wild'} {kind}"
 
 
 # ---------------------------------------------------------------- masks -----
@@ -299,7 +355,7 @@ def restyle_settings(args):
                     prompts=prompts(), negative=NEGATIVE)
 
 
-def render_job(root, dest, episode, restyle_seed, settings, args_relight=True):
+def render_job(root, dest, episode, restyle_seed, settings, args_relight=True, args_scramble=True):
     """Write one output episode's JPEGs (original bytes, or restyled) and its image stats."""
     import pickle
     from lerobot.datasets.compute_stats import compute_episode_stats
@@ -321,7 +377,12 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=True):
         frames = decode(images[camera])
         disparity = depth_model(frames)
         keep = np.stack([keep_mask(cv2.cvtColor(f, cv2.COLOR_RGB2BGR), d) for f, d in zip(frames, disparity)])
-        restyled = restyler.episode(frames, None, None, keep, restyle_seed, camera, ~keep,
+        source = frames
+        if args_scramble:  # new palette for the table and room; kept pixels stay the originals
+            source, report['scramble'] = scramble_background(frames, keep, restyle_seed)
+        from dataclasses import replace
+        restyler.settings = replace(settings, prompts=prompts(is_realistic(restyle_seed)))
+        restyled = restyler.episode(source, None, None, keep, restyle_seed, camera, ~keep,
                                     controls=controls(frames, disparity, keep))
         if args_relight:
             look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
@@ -332,7 +393,9 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=True):
             cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                         [cv2.IMWRITE_JPEG_QUALITY, 92])
     if restyle_seed is not None:
-        report.update(restyle_seed=restyle_seed, prompt=settings.prompts[restyle_seed % len(settings.prompts)],
+        chosen = prompts(is_realistic(restyle_seed))
+        report.update(restyle_seed=restyle_seed, prompt=chosen[restyle_seed % len(chosen)],
+                      realistic=is_realistic(restyle_seed),
                       restyle_settings={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     image_features = {k: v for k, v in real_features(root).items() if v['dtype'] == 'image'}
     buffer = {key: [str(dest / key.rsplit('.', 1)[-1] / f'{j:05d}.jpg') for j in range(count)]
@@ -357,7 +420,8 @@ def export(args):
     settings = restyle_settings(args)
     args.work.mkdir(parents=True, exist_ok=True)
     contract = dict(source=REAL, revision=revision, items=items,
-                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight)
+                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight,
+                    scramble=args.scramble)
     contract_path = args.work / 'settings.json'
     if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
         raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
@@ -368,7 +432,8 @@ def export(args):
           f'({len(restyled)} restyled copies)', flush=True)
     started = time.time()
     with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
-        futures = {pool.submit(render_job, args.root, dests[i], items[i][0], items[i][1], settings, args.relight): i
+        futures = {pool.submit(render_job, args.root, dests[i], items[i][0], items[i][1], settings, args.relight,
+                               args.scramble): i
                    for i in todo}
         for k, future in enumerate(as_completed(futures), 1):
             future.result()
@@ -435,15 +500,18 @@ def preview(args):
             columns = [frames, shown]
             if restyler is not None:
                 restyler.settings = replace(settings, carry_static=False)
-                restyled = restyler.episode(frames, None, None, keep, args.seed + k, camera, ~keep,
+                source = scramble_background(frames, keep, args.seed + k)[0] if args.scramble else frames
+                restyler.settings = replace(settings, carry_static=False, prompts=prompts(is_realistic(args.seed + k)))
+                restyled = restyler.episode(source, None, None, keep, args.seed + k, camera, ~keep,
                                             controls=controls(frames, disparity, keep))
-                columns += [restyled, relight(restyled, disparity, sample_lighting(args.seed + k), keep)]
+                columns = [frames, source, restyled, relight(restyled, disparity, sample_lighting(args.seed + k), keep)]
             for i in range(len(frames)):
                 rows.append(np.concatenate([c[i] for c in columns], 1))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
-    print(f'wrote {args.output} (revision {revision[:8]}): columns original, kept (blue = repainted)'
-          + ('' if restyler is None else ', restyled, restyled + relit'))
+    print(f'wrote {args.output} (revision {revision[:8]}): columns '
+          + ('original, kept (blue = repainted)' if restyler is None else
+             'original, restyle input' + (' (scrambled)' if args.scramble else '') + ', restyled, restyled + relit'))
 
 
 def main():
@@ -460,6 +528,8 @@ def main():
     common.add_argument('--guidance', type=float, default=1.)
     common.add_argument('--depth-scale', type=float, default=.6)
     common.add_argument('--canny-scale', type=float, default=.6)
+    common.add_argument('--no-scramble', dest='scramble', action='store_false',
+                        help='start the restyle from the original table instead of a random colour/texture')
     p = sub.add_parser('export', parents=[common])
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--work', type=Path, required=True, help='per-episode render folders (resumable)')
