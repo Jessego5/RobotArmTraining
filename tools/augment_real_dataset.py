@@ -65,7 +65,7 @@ NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, text, watermark, e
 
 # Most restyled episodes stay plausible (muted, everyday surfaces); some are wild, which
 # teaches the policy that the background does not matter.
-REALISTIC_SHARE = .7
+REALISTIC_SHARE = .5
 REALISTIC_PALETTES = ('grey and white', 'light wood', 'dark wood', 'charcoal black', 'beige and cream',
                       'cool grey', 'brown and tan', 'off-white')
 WILD_PALETTES = ('teal and white', 'deep blue', 'forest green', 'warm red', 'pastel pink', 'navy and orange',
