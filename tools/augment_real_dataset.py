@@ -163,6 +163,20 @@ def table_colour(image_bgr):
     return seed | ((np.abs((hue - table_hue + 180) % 360 - 180) < 22) & (chroma > 5) & (lab[..., 0] > 60))
 
 
+def wood_any_light(image_bgr, spread=14.):
+    """Pixels with the table's wood hue at any brightness, shadowed wood included (the
+    table test above wants lit wood). Low-chroma pixels (white fingers, grey metal, black
+    brackets) never count."""
+    lab = cv2.cvtColor(cv2.GaussianBlur(image_bgr, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    a, b = lab[..., 1] - 128, lab[..., 2] - 128
+    hue, chroma = np.degrees(np.arctan2(b, a)), np.hypot(a, b)
+    seed = wood(image_bgr)
+    if seed.sum() < 200:
+        return np.zeros(seed.shape, bool)
+    table_hue = np.median(hue[seed])
+    return (np.abs((hue - table_hue + 180) % 360 - 180) < spread) & (chroma > 6) & (lab[..., 0] > 20)
+
+
 def table_surface(disparity, table, grid=64, sigma=4.):
     """Smooth disparity of the table, filled in under objects (follows fisheye and perspective)."""
     height, width = disparity.shape
@@ -179,7 +193,7 @@ def table_surface(disparity, table, grid=64, sigma=4.):
     return cv2.resize(surface, (width, height), interpolation=cv2.INTER_LINEAR)
 
 
-def keep_mask(image_bgr, disparity, margin=.06, details=False):
+def keep_mask(image_bgr, disparity, margin=.06, details=False, clean=True):
     """Pixels to copy back unchanged: everything rising above the table, or not table-coloured and not farther.
 
     With `details`, also returns the height above the table surface and the table-coloured pixels.
@@ -209,6 +223,21 @@ def keep_mask(image_bgr, disparity, margin=.06, details=False):
             # ...unless they stand out from the table around them, like the pin lying on it.
             if abs(lightness[part].mean() - lightness[ring].mean()) < 25:
                 keep[part] = 0
+    if clean:
+        # Wood that the table test missed (in an arm's shadow, or the pale far edge) and
+        # that does not rise from the table: drop islands made mostly of it, and strip it
+        # from the rims of kept objects.
+        # Monocular depth bleeds near tall objects, so wood beside an arm reads a few cm
+        # high; only wood-coloured pixels well above the table (hands, forearms) stay.
+        loose = (table | wood_any_light(image_bgr, spread=24.)) & (residual < 2 * margin)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(keep)
+        for i in range(1, count):
+            part = labels == i
+            if stats[i, 4] < 4000 and loose[part].mean() > .6:
+                keep[part] = 0
+        rim = cv2.dilate((keep == 0).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+        keep[loose & rim] = 0
+        keep = cv2.morphologyEx(keep, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     keep = cv2.dilate(keep, np.ones((3, 3), np.uint8))
     # Small parts (the pin, the loose gear) get a wider margin: a restyle bleeding a few
     # pixels into them changes what they look like.
