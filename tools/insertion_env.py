@@ -8,7 +8,13 @@ by feel and by eye. This environment isolates that last step so a policy can
 learn the correction.
 
 Reset: a real demonstration's arm poses two seconds before it released the gear
-(phases from tools/replay_real_in_sim.py). The right arm holds the carrier at the
+(phases from tools/replay_real_in_sim.py).
+
+The gear seats as in the real wrist videos: slid edgewise into a slot in the
+carrier's rim, released half in, pushed home with the closed fingertips. The
+real slot holds a half-inserted gear by friction; the sim's is looser, so a
+modelled press fit holds the released gear in the slot's mouth and lets it move
+only inward. The right arm holds the carrier at the
 grip measured from the gear releases of 68 demonstrations, plus random error
 (default 4 mm, 6 degrees, the scatter measured between each demonstration's
 gear and pin releases); the left arm holds the gear (Zeb's top-down grip). Holds
@@ -75,6 +81,9 @@ class GearInsertionEnv:
         self.range = np.array([m.jnt_range[m.joint(j).id] for j in
                                ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')])
         self.ik_data = mujoco.MjData(m)
+        self.outward = self.slot[:3, 3].copy()
+        self.outward[2] = 0
+        self.outward /= np.linalg.norm(self.outward)
         # Collision bits: the left gripper's geoms get type 2, so a held gear (type 4, affinity 1)
         # passes through the fingers but still hits the carrier; once released the gear goes back
         # to type 1 with affinity 1|2 and the closed fingertips can push it.
@@ -157,6 +166,8 @@ class GearInsertionEnv:
         self.q = state[:6].copy()
         self.state = state
         self.released, self.t, self.closed = False, 0, False
+        self.fit_mm = None  # depth (mm outside the slot) the press fit holds the gear at, once caught
+        self.m.eq_solref[r.weld['gear_3']] = [.004, 1]
         self.set_gear_contact(held=True)
         mujoco.mj_forward(m, d)
         return self.observation()
@@ -165,6 +176,31 @@ class GearInsertionEnv:
         m = self.m
         m.geom_contype[self.gear_geoms] = 4 if held else 1
         m.geom_conaffinity[self.gear_geoms] = 1 if held else 3
+
+    def press_fit(self):
+        """The real slot holds a half-inserted gear by friction; the sim's slot is looser. Once
+        the released gear sits in the slot's mouth (lined up to 1 mm and 5 deg, at most 8 mm
+        out) a soft weld holds it there, keeping its spin, and lets it move only inward: each
+        push that takes it deeper becomes the new hold point."""
+        r, d = self.replay, self.d
+        rel = np.linalg.inv(self.carrier() @ self.slot) @ self.gear()
+        pos = rel[:3, 3] * 1000
+        radial = pos @ self.outward
+        off_axis = np.linalg.norm(pos - radial * self.outward)
+        tilt = np.degrees(np.arccos(np.clip(rel[2, 2], -1, 1)))
+        if self.fit_mm is None:
+            if radial > 8 or off_axis > 1 or tilt > 5:
+                return
+            self.fit_mm = radial
+            self.m.eq_solref[r.weld['gear_3']] = [.02, 1]  # soft enough for a fingertip push
+            d.eq_active[r.weld['gear_3']] = 1
+        self.fit_mm = max(0., min(self.fit_mm, radial))
+        spin = np.arctan2(rel[1, 0], rel[0, 0])
+        hold = np.eye(4)
+        hold[:3, :3] = Rotation.from_euler('z', spin).as_matrix()
+        hold[:3, 3] = self.fit_mm / 1000 * self.outward
+        target = self.carrier() @ self.slot @ hold
+        d.mocap_pos[r.mocap['gear_3']], d.mocap_quat[r.mocap['gear_3']] = target[:3, 3], quat(target[:3, :3])
 
     def grip_in_slot(self):
         """Left fingertip point (grip_site) in the slot frame, mm."""
@@ -204,7 +240,11 @@ class GearInsertionEnv:
             ctrl[6] = 0. if self.closed else 1.2  # open after release; closed to push
         r.set_arms(ctrl, ctrl_only=True)
         for _ in range(r.steps):
+            if self.released:
+                self.press_fit()
             for name, side, grip in (('large_carrier', 'right', self.carrier_grip), ('gear_3', 'left', self.gear_grip)):
+                if name == 'gear_3' and self.released:
+                    continue
                 if d.eq_active[r.weld[name]]:
                     target = r.grip(side) @ grip
                     d.mocap_pos[r.mocap[name]], d.mocap_quat[r.mocap[name]] = target[:3, 3], quat(target[:3, :3])

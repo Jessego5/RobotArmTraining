@@ -116,7 +116,7 @@ class PhysicsReplay:
         self.body = {n: m.body(n).id for n in PARTS}
         self.mocap = {n: m.body_mocapid[m.body(f'hold_{n}').id] for n in PARTS}
         self.weld = {n: next(e for e in range(m.neq) if m.eq_obj1id[e] == self.body[n]
-                             and m.eq_type[e] == mujoco.mjtEq.mjEQ_WELD) for n in PARTS}
+                             and m.eq_obj2id[e] == m.body(f'hold_{n}').id) for n in PARTS}
         self.free = {n: (m.jnt_qposadr[m.body_jntadr[self.body[n]]], m.jnt_dofadr[m.body_jntadr[self.body[n]]])
                      for n in PARTS}
         self.steps = round(1 / FPS / m.opt.timestep)
