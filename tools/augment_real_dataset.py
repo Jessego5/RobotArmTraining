@@ -416,10 +416,16 @@ def sample_lighting(seed: int) -> dict:
                 shadow_seed=int(rng.integers(2**31)), cast_shadow=float(rng.uniform(.3, .6)))
 
 
-def relight(frames_rgb, disparity, look: dict, keep=None):
+def relight(frames_rgb, disparity, look: dict, keep=None, camera='wrist'):
     """Apply one episode's lighting to every frame: directional shading from the estimated
     depth, shadows cast by the kept objects onto the table away from the light, a light
-    falloff across the frame, colour cast, exposure and drifting soft shadows."""
+    falloff across the frame, colour cast, exposure and drifting soft shadows.
+
+    Monocular depth comes with its own scale and offset in every frame, and the kept-object
+    masks wobble a little, so each frame's depth is normalised on its own and the shading is
+    smoothed over time: strongly for the fixed overhead camera (where any change reads as
+    flicker), lightly for the moving wrist cameras; cast shadows are smoothed lightly so they
+    keep up with the arms."""
     count, height, width = disparity.shape
     az, el = np.radians(look['light_azimuth']), np.radians(look['light_elevation'])
     light = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
@@ -436,9 +442,14 @@ def relight(frames_rgb, disparity, look: dict, keep=None):
         points = rng.uniform(-.1, 1.1, (keys, 2)) * [width, height]
         path = np.stack([np.interp(np.linspace(0, keys - 1, count), np.arange(keys), points[:, k]) for k in range(2)], 1)
         blobs.append((path, rng.uniform([30, 12], [110, 45]), rng.uniform(0, 180), rng.uniform(.3, .6)))
-    lo, hi = np.percentile(disparity, [1, 99])
+    # Weight of the new frame in each running layer: the overhead camera is fixed, so its
+    # depth shading can be averaged hard; cast shadows follow the arms, so they stay quick.
+    shade_rate = .05 if camera == 'overhead' else .5
+    shadow_rate = .5
+    shade_layer = shadow_layer = None
     out = np.empty_like(frames_rgb)
     for i, (frame, d) in enumerate(zip(frames_rgb, disparity)):
+        lo, hi = np.percentile(d, [1, 99])
         d = cv2.GaussianBlur(((d - lo) / max(hi - lo, 1e-6)).astype(np.float32), (0, 0), 5)
         gx, gy = cv2.Sobel(d, cv2.CV_32F, 1, 0, ksize=5), cv2.Sobel(d, cv2.CV_32F, 0, 1, ksize=5)
         normal = np.dstack([-gx * 4, -gy * 4, np.ones_like(d)])
@@ -458,7 +469,10 @@ def relight(frames_rgb, disparity, look: dict, keep=None):
             caster = cv2.warpAffine(keep[i].astype(np.float32), shift, (width, height))
             cast = cv2.GaussianBlur(caster, (0, 0), 3 + reach / 8) * look['cast_shadow']
             shadow = np.maximum(shadow, np.where(keep[i], 0, cast))
-        factor = (shade * gradient * vignette * (1 - np.clip(shadow, 0, .7)))[..., None] * look['gain']
+        shadow = 1 - np.clip(shadow, 0, .7)
+        shade_layer = shade if shade_layer is None else (1 - shade_rate) * shade_layer + shade_rate * shade
+        shadow_layer = shadow if shadow_layer is None else (1 - shadow_rate) * shadow_layer + shadow_rate * shadow
+        factor = (shade_layer * shadow_layer * gradient * vignette)[..., None] * look['gain']
         image = np.clip(frame.astype(np.float32) / 255 * factor * np.array(look['tint']), 0, 1) ** look['gamma']
         out[i] = (image * 255).astype(np.uint8)
     return out
@@ -683,7 +697,7 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
         if soft_edges:
             restyled = soft_composite(frames[camera], restyled, keep)
         if args_relight:
-            restyled = relight(restyled, disparity, look, keep)
+            restyled = relight(restyled, disparity, look, keep, camera)
             report['lighting'] = look
         report[f'{camera}_kept_share'] = float(keep.mean())
         out[camera] = restyled
@@ -800,7 +814,7 @@ def relight_job(source, index, maps_path, dest, look_seed, masks):
     maps = load_maps(maps_path) if maps_path and Path(maps_path).exists() else \
         compute_maps(frames, masks, numeric['observation.state'])
     look = sample_lighting(look_seed)
-    out = {camera: relight(frames[camera], maps[camera][1], look, maps[camera][0]) for camera in CAMERAS}
+    out = {camera: relight(frames[camera], maps[camera][1], look, maps[camera][0], camera) for camera in CAMERAS}
     report.update(lighting=look, look_seed=look_seed, maps='stored' if maps_path and Path(maps_path).exists()
                   else f'computed ({masks})')
     write_folder(source, dest, numeric, out, report)
@@ -893,7 +907,7 @@ def preview(args):
                                             controls=controls(shown, picked_disparity, keep))
                 if args.soft_edges:
                     restyled = soft_composite(shown, restyled, keep)
-                relit = relight(restyled, picked_disparity, sample_lighting(seed), keep)
+                relit = relight(restyled, picked_disparity, sample_lighting(seed), keep, camera)
                 columns += [relit] if len(variants) > 1 else [source, restyled, relit]
             for i in range(len(shown)):
                 rows.append(np.concatenate([c[i] for c in columns], 1))
