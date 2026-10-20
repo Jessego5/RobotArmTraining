@@ -524,9 +524,12 @@ def decode(jpegs):
 
 def restyle_settings(args):
     from tools.sim2real_augment import Settings
+    # carry_static is for the sim's fixed cameras. Here the restyle input is the scrambled
+    # background, a texture identical in every frame, so it would freeze the first frame's
+    # repaint and paste stale pieces forward as the wrist cameras move (mosaic blocks).
     return Settings(batch=args.batch, steps=args.steps, strength=args.strength, guidance=args.guidance,
                     size=args.size, depth_scale=args.depth_scale, canny_scale=args.canny_scale, ip_scale=0.,
-                    prompts=prompts(), negative=NEGATIVE)
+                    prompts=prompts(), negative=NEGATIVE, carry_static=False)
 
 
 MAP_SIZE = 128  # stored depth resolution for the later lighting pass
