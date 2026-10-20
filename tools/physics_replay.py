@@ -84,7 +84,12 @@ class PhysicsReplay:
             spec.worldbody.add_body(name=f'hold_{name}', mocap=True)
             spec.add_equality(type=mujoco.mjtEq.mjEQ_WELD, name1=name, name2=f'hold_{name}',
                               objtype=mujoco.mjtObj.mjOBJ_BODY, active=False,
-                              data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1])
+                              data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1], solref=[.004, 1])  # a firm grip
+        # A held part does not collide with the gripper holding it: the real fin-ray fingers
+        # deform around it, and rigid sim fingers overlapping it would jam it.
+        for part, prefix in (('large_carrier', 'right_'), ('gear_3', ''), ('pin_2', '')):
+            for link in ('link6', 'L_finger', 'R_finger'):
+                spec.add_exclude(bodyname1=part, bodyname2=prefix + link)
         self.model = m = spec.compile()
         self.data = d = mujoco.MjData(m)
         # The right base where the clicked-fingertip overhead solve puts it.
