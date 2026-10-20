@@ -326,7 +326,7 @@ def refine_keep(keep, residual, background, margin=.06):
 PROMPT_EVERY = 40  # frames between SAM 2 prompts (2 s at 20 Hz)
 
 
-def track_keep(tracker, frames_rgb, disparity, wanted=None):
+def track_keep(tracker, frames_rgb, disparity, wanted=None, clean=True):
     """Keep masks for the `wanted` frames (default all): the depth/colour heuristic,
     refined by SAM 2 when a tracker is given and it found the table.
 
@@ -334,7 +334,7 @@ def track_keep(tracker, frames_rgb, disparity, wanted=None):
     with a tracker, every PROMPT_EVERY-th frame.
     """
     wanted = range(len(frames_rgb)) if wanted is None else wanted
-    details = {i: keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True)
+    details = {i: keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True, clean=clean)
                for i in sorted(set(wanted) | (set(range(0, len(frames_rgb), PROMPT_EVERY)) if tracker else set()))}
     background = None if tracker is None else \
         tracker(frames_rgb, {i: details[i] for i in range(0, len(frames_rgb), PROMPT_EVERY)})
@@ -586,20 +586,23 @@ class RobotMasks:
         return np.stack([cv2.dilate(m.astype(np.uint8), kernel).astype(bool) for m in masks])
 
 
-def with_robot(frames_rgb, disparity, rendered, wanted=None):
+def with_robot(frames_rgb, disparity, rendered, wanted=None, clean=True):
     """The depth/colour mask plus the rendered robot, minus rendered pixels that are plainly
     flat table (the fitted cameras are a few pixels off, and the render is grown to cover
     that, so its rim would otherwise keep a halo of original wood around the arms)."""
     wanted = range(len(frames_rgb)) if wanted is None else wanted
     out = []
     for i, robot in zip(wanted, rendered):
-        keep, residual, table = keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True)
+        keep, residual, table = keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True,
+                                          clean=clean)
         out.append(keep | (robot & ~(table & (np.abs(residual) < .03))))
     return np.stack(out)
 
 
-def compute_maps(frames_by_camera, masks='depth', states=None):
+def compute_maps(frames_by_camera, masks='depth', states=None, clean=True):
     """Depth and kept-pixel masks per camera (loads the models once per process).
+
+    clean: repaint leftover wood beside the kept objects (see keep_mask).
 
     masks: 'robot' = the depth/colour mask plus the rendered robot (needs `states`);
     'depth' = the depth/colour mask alone; 'sam' = experimental SAM 2 tracking.
@@ -615,9 +618,9 @@ def compute_maps(frames_by_camera, masks='depth', states=None):
     for camera, frames in frames_by_camera.items():
         disparity = depth_model(frames)
         if masks == 'robot':
-            keep = with_robot(frames, disparity, robot_masks(camera, states))
+            keep = with_robot(frames, disparity, robot_masks(camera, states), clean=clean)
         else:
-            keep = track_keep(tracker, frames, disparity)
+            keep = track_keep(tracker, frames, disparity, clean=clean)
         maps[camera] = (keep, disparity)
     return maps
 
@@ -644,7 +647,7 @@ def write_folder(root, dest, numeric, frames_or_jpegs, report):
 
 
 def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='depth',
-               soft_edges=True, realistic=None):
+               soft_edges=True, realistic=None, clean=True):
     """Write one output episode (original JPEG bytes, or restyled frames) with its image stats.
 
     Restyled episodes also keep their depth and masks (maps.npz) for the `relight` pass.
@@ -663,7 +666,7 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
         restyler = Restyler(settings)
     realistic = is_realistic(restyle_seed) if realistic is None else realistic
     frames = {camera: decode(images[camera]) for camera in CAMERAS}
-    maps = compute_maps(frames, masks, numeric['observation.state'])
+    maps = compute_maps(frames, masks, numeric['observation.state'], clean)
     look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
     out = {}
     for camera in CAMERAS:
@@ -683,7 +686,7 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
         out[camera] = restyled
     save_maps(dest / 'maps.npz', maps)
     chosen = prompts(realistic)
-    report.update(restyle_seed=restyle_seed, prompt=chosen[restyle_seed % len(chosen)], masks=masks,
+    report.update(restyle_seed=restyle_seed, prompt=chosen[restyle_seed % len(chosen)], masks=masks, wood_cleanup=clean,
                   soft_edges=soft_edges, realistic=realistic,
                   restyle_settings={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     write_folder(root, dest, numeric, out, report)
@@ -746,32 +749,36 @@ def export(args):
     rng = np.random.default_rng(args.seed)
     restyled = sorted(rng.choice(episodes, size=round(len(episodes) * args.fraction), replace=False).tolist()) \
         if args.fraction else []
-    # (episode, restyle seed, realistic look, copy); copies alternate realistic / wild when balanced.
-    items = [(e, None, None, None) for e in episodes] if args.include_originals else []
-    items += [(e, args.seed * 100003 + e + 1000003 * k, (k % 2 == 0) if args.balanced else None, k)
+    # (episode, restyle seed, realistic look, copy, wood cleanup); copies alternate realistic / wild when
+    # balanced, and with --wood-cleanup both, cleanup alternates by episode and copy, so each demo has a
+    # copy of each kind and each look gets half of each.
+    clean = lambda e, k: {'on': True, 'off': False}.get(args.wood_cleanup, (e + k) % 2 == 0)
+    items = [(e, None, None, None, None) for e in episodes] if args.include_originals else []
+    items += [(e, args.seed * 100003 + e + 1000003 * k, (k % 2 == 0) if args.balanced else None, k, clean(e, k))
               for k in range(args.copies) for e in restyled]
     settings = restyle_settings(args)
     args.work.mkdir(parents=True, exist_ok=True)
     contract = dict(source=REAL, revision=revision, items=items,
                     restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight,
                     scramble=args.scramble, masks=args.masks, soft_edges=args.soft_edges,
-                    palettes=[REALISTIC_PALETTES, WILD_PALETTES])
+                    wood_cleanup=args.wood_cleanup, palettes=[REALISTIC_PALETTES, WILD_PALETTES])
     contract_path = args.work / 'settings.json'
     if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
         raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
     contract_path.write_text(json.dumps(contract, indent=2) + '\n')
-    dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k in items]
+    dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k, _ in items]
     todo = [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]
     print(f'{len(items) - len(todo)} of {len(items)} episodes ready; rendering {len(todo)} '
           f'({len(restyled) * args.copies} restyled copies)', flush=True)
     run_jobs(render_job, [(args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
-                           args.masks, args.soft_edges, items[i][2]) for i in todo], args.workers)
+                           args.masks, args.soft_edges, items[i][2], items[i][4]) for i in todo], args.workers)
     provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py export',
                       method='table/background restyle; robot, parts and hands copied back from the real frames',
                       depth_model=DEPTH_MODEL, masks=args.masks, soft_edges=args.soft_edges,
                       sam_model=SAM_MODEL if args.masks == 'sam' else None, relight=args.relight,
                       include_originals=args.include_originals, restyled_source_episodes=restyled,
-                      copies=args.copies, balanced=args.balanced, work=str(args.work),
+                      copies=args.copies, balanced=args.balanced, wood_cleanup=args.wood_cleanup,
+                      work=str(args.work),
                       restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
     total = write_dataset(args.root, args.output, dests, provenance, args.keep_jpegs)
     print(f'complete: {len(items)} episodes ({len(restyled) * args.copies} restyled), {total} frames at {args.output}')
@@ -921,6 +928,9 @@ def main():
     p.add_argument('--work', type=Path, required=True, help='per-episode render folders (resumable)')
     p.add_argument('--fraction', type=float, default=1., help='share of episodes that get restyled copies')
     p.add_argument('--copies', type=int, default=2, help='restyled copies per chosen episode')
+    p.add_argument('--wood-cleanup', choices=('both', 'on', 'off'), default='both',
+                   help='repaint leftover wood beside kept objects: on, off (the earlier masks), or both '
+                        '(alternating, so each demo has a copy of each)')
     p.add_argument('--unbalanced', dest='balanced', action='store_false',
                    help='pick each copy\'s look at random instead of alternating realistic / wild')
     p.add_argument('--no-originals', dest='include_originals', action='store_false')
