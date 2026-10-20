@@ -9,6 +9,9 @@ so this only changes how the scene looks. Per frame:
   pixels; everything that rises above it (arms, grippers, fingers, carrier, gear,
   pin, operator hands), plus anything not wood-coloured that is not farther than
   the table, is KEPT and copied back exactly; glare and small flat patches are not;
+- the robot itself is rendered from each frame's recorded joint angles through the
+  cameras fitted to the demonstrations (sim/real_cameras.json) and always kept, so
+  no arm or gripper pixel is repainted (--masks depth skips this);
 - optionally (--masks sam, experimental) SAM 2 video segmentation tracks the table
   and room through each 2 s chunk from points that mask is sure about; the
   copy-back edge is blended with a guided filter;
@@ -526,17 +529,67 @@ def load_maps(path):
     return maps
 
 
-def compute_maps(frames_by_camera, masks='depth'):
-    """Depth and kept-pixel masks per camera (loads the models once per process)."""
-    global depth_model, tracker
+class RobotMasks:
+    """The robot as each real camera sees it, rendered from the recorded joint angles.
+
+    Uses the cameras fitted to the demonstrations (sim/real_cameras.json: the overhead
+    camera solved from clicked fingertips, the wrist cameras from arm outlines) and the
+    CAD arms of sim/bimanual_cad.py. Grown by a couple of pixels for the fit's error;
+    the guided-filter copy-back snaps the edge to the image.
+    """
+
+    def __init__(self):
+        if sys.platform.startswith('linux'):
+            os.environ.setdefault('MUJOCO_GL', 'egl')
+        from tools.fit_cameras import Scene
+        self.scene = Scene()
+        cameras = json.loads((ROOT / 'sim/real_cameras.json').read_text())
+        self.params = {c: np.array(list(cameras[c]['params'].values()), float) for c in CAMERAS}
+
+    def __call__(self, camera, states, grow=2):
+        from tools.fit_cameras import overhead_masks, wrist_masks
+        if camera == 'overhead':
+            masks = overhead_masks(self.scene, self.params[camera], states)
+        else:
+            self.scene.set_right_base(0., 0., 0.)  # the wrist fits used the estimated layout
+            masks = wrist_masks(self.scene, camera, self.params[camera], states)
+        kernel = np.ones((2 * grow + 1,) * 2, np.uint8)
+        return np.stack([cv2.dilate(m.astype(np.uint8), kernel).astype(bool) for m in masks])
+
+
+def with_robot(frames_rgb, disparity, rendered, wanted=None):
+    """The depth/colour mask plus the rendered robot, minus rendered pixels that are plainly
+    flat table (the fitted cameras are a few pixels off, and the render is grown to cover
+    that, so its rim would otherwise keep a halo of original wood around the arms)."""
+    wanted = range(len(frames_rgb)) if wanted is None else wanted
+    out = []
+    for i, robot in zip(wanted, rendered):
+        keep, residual, table = keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True)
+        out.append(keep | (robot & ~(table & (np.abs(residual) < .03))))
+    return np.stack(out)
+
+
+def compute_maps(frames_by_camera, masks='robot', states=None):
+    """Depth and kept-pixel masks per camera (loads the models once per process).
+
+    masks: 'robot' = the depth/colour mask plus the rendered robot (needs `states`);
+    'depth' = the depth/colour mask alone; 'sam' = experimental SAM 2 tracking.
+    """
+    global depth_model, tracker, robot_masks
     if 'depth_model' not in globals():
         depth_model = Depth()
     if 'tracker' not in globals():
         tracker = TableTracker() if masks == 'sam' else None
+    if masks == 'robot' and 'robot_masks' not in globals():
+        robot_masks = RobotMasks()
     maps = {}
     for camera, frames in frames_by_camera.items():
         disparity = depth_model(frames)
-        maps[camera] = (track_keep(tracker, frames, disparity), disparity)
+        if masks == 'robot':
+            keep = with_robot(frames, disparity, robot_masks(camera, states))
+        else:
+            keep = track_keep(tracker, frames, disparity)
+        maps[camera] = (keep, disparity)
     return maps
 
 
@@ -561,7 +614,7 @@ def write_folder(root, dest, numeric, frames_or_jpegs, report):
     (dest / 'done.json').write_text(json.dumps(report) + '\n')
 
 
-def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='depth',
+def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='robot',
                soft_edges=True, realistic=None):
     """Write one output episode (original JPEG bytes, or restyled frames) with its image stats.
 
@@ -581,7 +634,7 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
         restyler = Restyler(settings)
     realistic = is_realistic(restyle_seed) if realistic is None else realistic
     frames = {camera: decode(images[camera]) for camera in CAMERAS}
-    maps = compute_maps(frames, masks)
+    maps = compute_maps(frames, masks, numeric['observation.state'])
     look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
     out = {}
     for camera in CAMERAS:
@@ -705,7 +758,8 @@ def relight_job(source, index, maps_path, dest, look_seed, masks):
         write_folder(source, dest, numeric, images, report)
         return
     frames = {camera: decode(images[camera]) for camera in CAMERAS}
-    maps = load_maps(maps_path) if maps_path and Path(maps_path).exists() else compute_maps(frames, masks)
+    maps = load_maps(maps_path) if maps_path and Path(maps_path).exists() else \
+        compute_maps(frames, masks, numeric['observation.state'])
     look = sample_lighting(look_seed)
     out = {camera: relight(frames[camera], maps[camera][1], look, maps[camera][0]) for camera in CAMERAS}
     report.update(lighting=look, look_seed=look_seed, maps='stored' if maps_path and Path(maps_path).exists()
@@ -750,20 +804,21 @@ def relight_dataset(args):
 def preview(args):
     """A few frames per camera: original | restyle input | restyled | restyled + relit.
 
-    With --masks compare: original | depth mask | SAM 2 mask (blue = repainted), and with
-    the restyle also each mask's relit result.
+    With --compare-masks: original | depth mask | robot + depth mask (blue = repainted,
+    green = rendered robot outline), and with the restyle also each mask's relit result.
     """
     revision = fetch(args.root, args.revision)
     from dataclasses import replace
     from tools.sim2real_augment import Restyler
     settings = restyle_settings(args)
     depth_model = Depth()
-    tracker = None if args.masks == 'depth' else TableTracker()
+    tracker = TableTracker() if args.masks == 'sam' else None
+    robot = RobotMasks() if args.masks in ('robot', 'compare') else None
     restyler = None if args.no_restyle else Restyler(settings)
-    variants = dict(depth=['depth'], sam=['sam'], compare=['depth', 'sam'])[args.masks]
+    variants = ['depth', 'robot'] if args.masks == 'compare' else [args.masks]
     rows = []
     for k, episode in enumerate(args.episodes):
-        _, images = episode_rows(args.root, episode)
+        numeric, images = episode_rows(args.root, episode)
         seed = args.seed + k
         for camera in CAMERAS:
             frames = decode(images[camera])
@@ -771,12 +826,18 @@ def preview(args):
             need = sorted(set(pick) | (set(range(0, len(frames), PROMPT_EVERY)) if tracker else set()))
             disparity = dict(zip(need, depth_model(frames[need])))
             shown, picked_disparity = frames[pick], np.stack([disparity[i] for i in pick])
+            rendered = robot(camera, numeric['observation.state'][pick]) if robot else None
             columns = [shown]
             for variant in variants:
-                keep = track_keep(tracker if variant == 'sam' else None, frames, disparity, pick)
+                keep = with_robot(frames, disparity, rendered, pick) if variant == 'robot' else \
+                    track_keep(tracker if variant == 'sam' else None, frames, disparity, pick)
                 if restyler is None or len(variants) > 1:
                     overlay = shown.copy()
                     overlay[~keep] = (overlay[~keep] * .3 + np.array([0, 80, 255]) * .4).astype(np.uint8)
+                    if variant == 'robot':
+                        for i, m in enumerate(rendered):
+                            edge = m ^ cv2.erode(m.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+                            overlay[i][edge] = (0, 255, 0)
                     columns.append(overlay)
                 if restyler is None:
                     continue
@@ -784,7 +845,7 @@ def preview(args):
                 restyler.settings = replace(settings, carry_static=False, prompts=prompts(is_realistic(seed)))
                 restyled = restyler.episode(source, None, None, keep, seed, camera, ~keep,
                                             controls=controls(shown, picked_disparity, keep))
-                if variant == 'sam' and args.soft_edges:
+                if args.soft_edges:
                     restyled = soft_composite(shown, restyled, keep)
                 relit = relight(restyled, picked_disparity, sample_lighting(seed), keep)
                 columns += [relit] if len(variants) > 1 else [source, restyled, relit]
@@ -793,7 +854,8 @@ def preview(args):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
     if len(variants) > 1:
-        names = 'original, depth mask, SAM 2 mask' + ('' if restyler is None else ', depth-mask result, SAM 2 result')
+        names = 'original, depth mask, robot + depth mask' + \
+            ('' if restyler is None else ', depth-mask result, robot-mask result')
     elif restyler is None:
         names = 'original, kept (blue = repainted)'
     else:
@@ -815,10 +877,11 @@ def main():
     common.add_argument('--guidance', type=float, default=1.)
     common.add_argument('--depth-scale', type=float, default=.6)
     common.add_argument('--canny-scale', type=float, default=.6)
-    common.add_argument('--masks', choices=('sam', 'depth'), default='depth',
-                        help='depth: the depth/colour mask; sam: SAM 2 video tracking of the table, prompted by '
-                             'points from that mask (experimental: point prompts outline grain patches, not the '
-                             'whole table)')
+    common.add_argument('--masks', choices=('robot', 'depth', 'sam'), default='robot',
+                        help='robot: the depth/colour mask plus the robot rendered from the recorded joint angles '
+                             'through the fitted cameras (sim/real_cameras.json); depth: the depth/colour mask '
+                             'alone; sam: SAM 2 video tracking of the table (experimental: its point prompts '
+                             'outline grain patches, not the whole table)')
     common.add_argument('--hard-edges', dest='soft_edges', action='store_false',
                         help='copy kept pixels back with a hard mask edge instead of a guided-filter blend')
     common.add_argument('--no-scramble', dest='scramble', action='store_false',
@@ -845,7 +908,8 @@ def main():
     p.add_argument('--fraction', type=float, default=1.)
     p.add_argument('--no-source', dest='include_source', action='store_false',
                    help='only the relit copies, not the source episodes as they are')
-    p.add_argument('--masks', choices=('sam', 'depth'), default='depth', help='for episodes without stored maps')
+    p.add_argument('--masks', choices=('robot', 'depth', 'sam'), default='robot',
+                   help='for episodes without stored maps')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--keep-jpegs', action='store_true')
@@ -854,7 +918,7 @@ def main():
     p.add_argument('--episodes', type=int, nargs='+', default=[0, 101])
     p.add_argument('--frames', type=int, default=2)
     p.add_argument('--no-restyle', action='store_true', help='masks only (no diffusion models)')
-    p.add_argument('--compare-masks', action='store_true', help='depth mask and SAM 2 mask side by side')
+    p.add_argument('--compare-masks', action='store_true', help='depth mask and robot + depth mask side by side')
     args = parser.parse_args()
     if getattr(args, 'compare_masks', False):
         args.masks = 'compare'
