@@ -41,6 +41,18 @@ from tools.fit_cameras import SIZE, WRIST_LIMIT, WRIST_RENDER, WRIST_RENDER_FOV,
 from scipy.spatial.transform import Rotation
 
 CAMERAS = ('overhead', 'wrist_port2', 'wrist_port3')
+# How each part sits in its gripper while held, as part pose in the grip_site frame
+# (offset in m, rotation), measured from Zeb's controller in the CAD sim
+# (outputs/cad_eps/episode_0000: carrier frame 10, gear frame 80, pin frame 420;
+# steady to 0.1 mm across the hold).
+GRASP = {
+    'large_carrier': ([.0054, -.0004, -.0150], [[-.70, -.01, -.72], [0., -1., .01], [-.72, .01, .70]]),
+    'gear_3': ([.0038, -.0003, .0180], [[0., 0., -1.], [0., 1., 0.], [1., 0., 0.]]),
+    'pin_2': ([.0127, -.0002, 0.], [[0., 0., -1.], [0., 1., 0.], [1., 0., 0.]]),
+}
+# The fixture under the held carrier, in the carrier's frame (same episode, frame 0:
+# the carrier sits 52.6 mm above the fixture's origin, axes aligned).
+FIXTURE_IN_CARRIER = np.array([[1., 0., 0., .0003], [0., 1., 0., .0003], [0., 0., 1., -.0526], [0., 0., 0., 1.]])
 # Gripper openings (rad, 0 closed .. 2 open) that mean "holding this part".
 HOLD = {'carrier': (.75, 1.35), 'gear': (.35, .85), 'pin': (.06, .35)}
 EMPTY_CLOSED = .06
@@ -88,6 +100,78 @@ def phase_labels(segments, count):
         for i in range(s['start'], s['stop']):
             labels[i] = s['phase']
     return labels
+
+
+# ---------------------------------------------------------------- parts -----
+
+def transform(pos, rot):
+    u, _, vt = np.linalg.svd(np.asarray(rot, float))  # re-orthonormalise the rounded rotation
+    t = np.eye(4)
+    t[:3, :3], t[:3, 3] = u @ vt, pos
+    return t
+
+
+def grip_frames(scene, states):
+    """World pose of each gripper's grip_site (between the fingertips) per frame."""
+    m, d = scene.model, scene.data
+    sites = {'left': m.site('grip_site').id, 'right': m.site('right_grip_site').id}
+    out = {side: [] for side in sites}
+    for state in states:
+        scene.pose(state)
+        for side, i in sites.items():
+            t = np.eye(4)
+            t[:3, :3], t[:3, 3] = d.site_xmat[i].reshape(3, 3), d.site_xpos[i]
+            out[side].append(t)
+    return {side: np.stack(v) for side, v in out.items()}
+
+
+def part_poses(scene, states, segments):
+    """World pose of the carrier, gear and pin per frame, from the gripper phases.
+
+    A part rests where its gripper closes on it until the grasp, moves with the
+    gripper while held, and after release rides on the carrier (which the right
+    arm holds throughout). The fixture sits under the carrier where it was grasped.
+    """
+    count = len(states)
+    grips = grip_frames(scene, states)
+    first = lambda side, phase: next((g for g in segments[side] if g['phase'] == phase), None)
+    held = lambda side, name, a, b: [grips[side][min(max(i, a), b - 1)] @ transform(*GRASP[name])
+                                     for i in range(count)]
+    poses = {}
+    hold = first('right', 'carrier_held')
+    if hold is None:
+        return poses, None
+    a = hold['start']
+    poses['large_carrier'] = np.stack(held('right', 'large_carrier', a, count))
+    carrier = poses['large_carrier']
+    for name, phase in (('gear_3', 'gear_held'), ('pin_2', 'pin_held')):
+        g = first('left', phase)
+        if g is None:
+            continue
+        track = held('left', name, g['start'], g['stop'])
+        on_carrier = np.linalg.inv(carrier[g['stop'] - 1]) @ track[g['stop'] - 1]
+        for i in range(g['stop'], count):
+            track[i] = carrier[i] @ on_carrier
+        poses[name] = np.stack(track)
+    return poses, carrier[a]
+
+
+def apply_parts(scene, poses, i, fixture):
+    """Write frame i's part poses into the scene (free joints; the fixture is a fixed body)."""
+    m, d = scene.model, scene.data
+    for name, track in poses.items():
+        adr = m.jnt_qposadr[m.body_jntadr[m.body(name).id]]
+        q = np.zeros(4)
+        mujoco.mju_mat2Quat(q, track[i][:3, :3].flatten())
+        d.qpos[adr:adr + 3], d.qpos[adr + 3:adr + 7] = track[i][:3, 3], q
+    if fixture is not None:
+        body = m.body('small_carrier').id
+        q = np.zeros(4)
+        mujoco.mju_mat2Quat(q, fixture[:3, :3].flatten())
+        m.body_pos[body], m.body_quat[body] = fixture[:3, 3], q
+        m.geom_pos[m.geom('fixture').id, :2] = fixture[:2, 3]
+    mujoco.mj_kinematics(m, d)
+    mujoco.mj_camlight(m, d)
 
 
 # ---------------------------------------------------------------- render ----
@@ -146,8 +230,10 @@ class RealViews:
             m.cam_quat[cam] = [q[3], q[0], q[1], q[2]]
             m.cam_fovy[cam] = WRIST_RENDER_FOV
 
-    def render(self, state):
+    def render(self, state, parts=None, i=0, fixture=None):
         self.scene.pose(state)
+        if parts:
+            apply_parts(self.scene, parts, i, fixture)
         out = {}
         for camera in CAMERAS:
             renderer = self.overhead if camera == 'overhead' else self.wrist
@@ -185,12 +271,15 @@ def main():
         for side, segs in segments.items():
             print(f'  {side:5s} ' + ', '.join(f"{s['phase']} {s['start'] / 20:.1f}-{s['stop'] / 20:.1f}s" for s in segs))
         real = {c: decode(images[c]) for c in CAMERAS}
+        parts, carrier_rest = part_poses(scene, states, segments)
+        # The fixture under the carrier where it was grasped, as in Zeb's scene (carrier on fixture).
+        fixture = None if carrier_rest is None else carrier_rest @ FIXTURE_IN_CARRIER
         video = cv2.VideoWriter(str(args.output / f'demo_{episode:03d}.mp4'), cv2.VideoWriter_fourcc(*'mp4v'), 20,
                                 (SIZE * 3, SIZE * 3))
         stills = set(np.linspace(0, len(states) - 1, args.stills + 2)[1:-1].astype(int).tolist())
         sheet = []
         for i, state in enumerate(states):
-            sim = views.render(state)
+            sim = views.render(state, parts, i, fixture)
             rows = []
             for camera in CAMERAS:
                 blend = cv2.addWeighted(real[camera][i], .5, sim[camera], .5, 0)
