@@ -77,7 +77,9 @@ def quat(rotation):
 
 
 class PhysicsReplay:
-    def __init__(self, cameras: Path):
+    def __init__(self, cameras: Path, exclude_left=True):
+        """exclude_left: the gear and pin never collide with the left gripper (replay); the
+        insertion environment instead switches that on at release, to push with the fingertips."""
         from sim.bimanual_cad import build_scene
         spec = mujoco.MjSpec.from_file(str(build_scene('original')))
         for name in PARTS:  # a mocap handle per part and a weld to it, off until the part is held
@@ -87,7 +89,9 @@ class PhysicsReplay:
                               data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1], solref=[.004, 1])  # a firm grip
         # A held part does not collide with the gripper holding it: the real fin-ray fingers
         # deform around it, and rigid sim fingers overlapping it would jam it.
-        for part, prefix in (('large_carrier', 'right_'), ('gear_3', ''), ('pin_2', '')):
+        pairs = (('large_carrier', 'right_'), ('gear_3', ''), ('pin_2', '')) if exclude_left else \
+            (('large_carrier', 'right_'),)
+        for part, prefix in pairs:
             for link in ('link6', 'L_finger', 'R_finger'):
                 spec.add_exclude(bodyname1=part, bodyname2=prefix + link)
         self.model = m = spec.compile()

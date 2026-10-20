@@ -53,7 +53,7 @@ class GearInsertionEnv:
     def __init__(self, root=ROOT / 'outputs/real_gear', episodes=None, noise_mm=4., noise_deg=6., seed=0,
                  lead_s=2.):
         from tools.augment_real_dataset import episode_rows
-        self.replay = r = PhysicsReplay(ROOT / 'sim/real_cameras.json')
+        self.replay = r = PhysicsReplay(ROOT / 'sim/real_cameras.json', exclude_left=False)
         self.m, self.d = r.model, r.data
         self.rng = np.random.default_rng(seed)
         self.noise_mm, self.noise_deg = noise_mm, noise_deg
@@ -75,6 +75,14 @@ class GearInsertionEnv:
         self.range = np.array([m.jnt_range[m.joint(j).id] for j in
                                ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')])
         self.ik_data = mujoco.MjData(m)
+        # Collision bits: the left gripper's geoms get type 2, so a held gear (type 4, affinity 1)
+        # passes through the fingers but still hits the carrier; once released the gear goes back
+        # to type 1 with affinity 1|2 and the closed fingertips can push it.
+        left = {m.body(b).id for b in ('link6', 'L_finger', 'R_finger')}
+        self.left_geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] in left and m.geom_contype[g]]
+        m.geom_contype[self.left_geoms] = 2
+        gear = r.body['gear_3']
+        self.gear_geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] == gear and (m.geom_contype[g] or m.geom_conaffinity[g])]
 
     # ------------------------------------------------------------ helpers --
     def carrier(self):
@@ -148,20 +156,33 @@ class GearInsertionEnv:
         r.place('pin_2', transform([.45, .25, .0503], np.eye(3)))  # out of the way
         self.q = state[:6].copy()
         self.state = state
-        self.released, self.t = False, 0
+        self.released, self.t, self.closed = False, 0, False
+        self.set_gear_contact(held=True)
         mujoco.mj_forward(m, d)
         return self.observation()
+
+    def set_gear_contact(self, held):
+        m = self.m
+        m.geom_contype[self.gear_geoms] = 4 if held else 1
+        m.geom_conaffinity[self.gear_geoms] = 1 if held else 3
+
+    def grip_in_slot(self):
+        """Left fingertip point (grip_site) in the slot frame, mm."""
+        rel = np.linalg.inv(self.carrier() @ self.slot) @ self.replay.grip('left')
+        return rel[:3, 3] * 1000
 
     def observation(self):
         pos, _ = self.slot_error()
         return np.r_[self.d.qpos[self.left_q], pos, self.tilt_error(), float(self.released)]
 
     def step(self, action):
-        """action: [dx, dy, dz (mm, carrier frame), droll, dpitch, dyaw (deg), release (>0)]."""
+        """action: [dx, dy, dz (mm, carrier frame), droll, dpitch, dyaw (deg), release (>0),
+        close the gripper after release (>0)]. The hand keeps moving after the release, so it
+        can push the gear home with its closed fingertips."""
         r, m, d = self.replay, self.m, self.d
         move = np.clip(action[:3], -2, 2) / 1000
         turn = np.radians(np.clip(action[3:6], -2, 2))
-        if not self.released:
+        if True:
             carrier = self.carrier()
             # Move from where the hand was *commanded*, not where it is: the joint position
             # control sags by about 1 mrad under gravity, so building on the measured pose
@@ -172,13 +193,15 @@ class GearInsertionEnv:
             target[:3, :3] = carrier[:3, :3] @ Rotation.from_rotvec(turn).as_matrix() @ carrier[:3, :3].T @ grip[:3, :3]
             # At most 0.03 rad per joint per step: an unreachable target must not fling the gear.
             self.q = self.q + np.clip(self.ik(target, self.q) - self.q, -.03, .03)
-            if action[6] > 0:
+            if action[6] > 0 and not self.released:
                 self.released = True
                 d.eq_active[r.weld['gear_3']] = 0
+                self.set_gear_contact(held=False)
+            self.closed = self.released and len(action) > 7 and action[7] > 0
         ctrl = self.state.copy()
         ctrl[:6] = self.q
         if self.released:
-            ctrl[6] = 1.2  # open the left gripper
+            ctrl[6] = 0. if self.closed else 1.2  # open after release; closed to push
         r.set_arms(ctrl, ctrl_only=True)
         for _ in range(r.steps):
             for name, side, grip in (('large_carrier', 'right', self.carrier_grip), ('gear_3', 'left', self.gear_grip)):
@@ -193,36 +216,66 @@ class GearInsertionEnv:
         return self.observation(), reward, seated, dict(slot_error_mm=pos, seated=seated)
 
 
-def scripted(env, max_steps=160, standoff_mm=15.):
-    """Privileged baseline, the way Zeb's controller seats the gear: the slot is in the
-    carrier's rim, so line the gear up a standoff outside the slot in the carrier's plane
-    (radially), slide it in, release, let it settle."""
+def scripted(env, max_steps=220, standoff_mm=15., half_mm=6., gear_radius_mm=12.):
+    """Privileged baseline doing what the real operators do (seen in the wrist videos):
+    slide the gear edgewise into the slot in the carrier's rim, release it half in (the
+    slot holds it), back off, close the fingers, and push it home with the fingertips."""
     outward = env.slot[:3, 3].copy()
     outward[2] = 0
     outward /= np.linalg.norm(outward)
+    stage, count = 'align', 0
     for _ in range(max_steps):
         pos, _ = env.slot_error()
         rot = env.tilt_error()
-        if env.released:
-            break
-        radial = pos @ outward  # mm outside the slot along the rim's outward direction
-        off_axis = pos - radial * outward  # sideways and height error
+        radial = pos @ outward
+        off_axis = pos - radial * outward
         tilt = np.degrees(np.linalg.norm(rot))
-        lined_up = np.linalg.norm(off_axis) < .4 and tilt < 1.5
-        if not lined_up and radial < standoff_mm - 2:
-            goal = standoff_mm * outward  # back out to the standoff before correcting
-            move = -(pos - goal) * .7
-            move -= (move @ outward) * outward * (np.linalg.norm(off_axis) > 1.5)  # out first, then across
-            move += max(0., standoff_mm - radial) * .7 * outward
-        elif not lined_up:
-            move = -off_axis * .7 - (radial - standoff_mm) * .3 * outward
-        else:
-            move = -off_axis * .7 - min(radial, 1.5) * outward  # slide in, 1.5 mm per step
         turn = -np.degrees(rot) * .5
-        release = lined_up and radial < .8
-        env.step(np.r_[move, turn, 1. if release else -1.])
+        release, close = -1., -1.
+        if stage == 'align':
+            lined_up = np.linalg.norm(off_axis) < .4 and tilt < 1.5
+            if radial < standoff_mm - 2 and not lined_up:
+                move = (standoff_mm - radial) * .7 * outward * (np.linalg.norm(off_axis) > 1.5) - off_axis * .7
+            else:
+                move = -off_axis * .7 - (radial - standoff_mm) * .3 * outward
+            if lined_up and abs(radial - standoff_mm) < 1.5:
+                stage = 'insert'
+        elif stage == 'insert':
+            move = -off_axis * .7 - min(radial - half_mm, 1.5) * outward
+            if radial <= half_mm + .3:
+                stage, release = 'back_off', 1.
+        else:
+            release = 1.
+            turn = np.zeros(3)
+            tip = env.grip_in_slot()
+            if stage == 'back_off':  # straight out, away from the gear's rim
+                goal = pos + (gear_radius_mm + 12) * outward
+                close = -1.
+                if np.linalg.norm(tip - goal) < 1.5:
+                    stage, count = 'close', 0
+            elif stage == 'close':
+                goal, close = tip, 1.
+                count += 1
+                if count > 8:
+                    stage = 'approach'
+            elif stage == 'approach':  # fingertips just outside the gear's outer rim
+                goal, close = pos + (gear_radius_mm + 3) * outward, 1.
+                if np.linalg.norm(tip - goal) < 1.:
+                    stage, count = 'push', 0
+            elif stage == 'push':  # push inward until the gear is flush
+                goal, close = tip - 1. * outward, 1.
+                count += 1
+                if radial < .3 or count > 40:
+                    stage, count = 'retreat', 0
+            else:  # retreat
+                goal, close = tip + 1.5 * outward, 1.
+                count += 1
+                if count > 6:
+                    break
+            move = (goal - tip) * .8
+        env.step(np.r_[move, turn, release, close])
     for _ in range(10):
-        _, _, seated, _ = env.step(np.zeros(7))
+        env.step(np.r_[np.zeros(6), 1., 1.])
     return env.seated(), env.slot_error()[0]
 
 
