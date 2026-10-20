@@ -1,0 +1,62 @@
+{
+  "_about": "Real cameras fitted to the Oct 5 demonstrations (FoxNerdSaysMoo/panthera-gear-carrier-pin-real-20hz, revision 261b654d) with the CAD arms of sim/bimanual_cad.py posed from recorded joint angles. Parameter meanings and the camera models: tools/fit_cameras.py (overhead_masks, wrist_masks). Overhead: least squares on 100 clicked fingertips in 29 frames (tools/solve_overhead_clicks.py). Wrists: arm-outline search (tools/fit_cameras.py).",
+  "overhead": {
+    "params": {
+      "px": 0.07363814255082943,
+      "py": 0.002254031780184301,
+      "pz": 0.9752678499123699,
+      "tx": 1.0575026753529306,
+      "ty": -0.10376387745969065,
+      "roll": 0.6311666227238157,
+      "fovy": 78.60450251918641,
+      "cx": 14.104024754977308,
+      "cy": 11.554854802717696,
+      "k1": 0.3999999999817135,
+      "base_dx": 0.014027721748736495,
+      "base_dy": -0.026592270380281766,
+      "base_dyaw": 2.651517381859776
+    },
+    "method": "clicked fingertips",
+    "rms_px": 3.64,
+    "median_px": 2.44,
+    "held_out_precision": 0.981
+  },
+  "wrist_port2": {
+    "params": {
+      "dx": 0.009363616329405562,
+      "dy": 0.003522794078338782,
+      "dz": 0.0142584894650795,
+      "rx": -0.024126322367155045,
+      "ry": -0.009606713414610347,
+      "rz": 0.0006554820724068629,
+      "f": 166.74063066410278,
+      "cx": 150.69175829968287,
+      "cy": 143.49905489790572
+    },
+    "method": "outline search",
+    "held_out": {
+      "iou": 0.649563874524009,
+      "precision": 0.9173413184156892,
+      "outline_px": 5.6865681409835815
+    }
+  },
+  "wrist_port3": {
+    "params": {
+      "dx": 0.02042909579179067,
+      "dy": 0.00013648407313926242,
+      "dz": 0.025265596810530505,
+      "rx": -2.775152686958664,
+      "ry": -0.07829011094351801,
+      "rz": -1.1331238800824426,
+      "f": 124.97801046462013,
+      "cx": 125.84633429863223,
+      "cy": 129.32493245432528
+    },
+    "method": "outline search",
+    "held_out": {
+      "iou": 0.5594379364537502,
+      "precision": 0.8554327756834046,
+      "outline_px": 5.894136230150859
+    }
+  }
+}
