@@ -9,17 +9,26 @@ so this only changes how the scene looks. Per frame:
   pixels; everything that rises above it (arms, grippers, fingers, carrier, gear,
   pin, operator hands), plus anything not wood-coloured that is not farther than
   the table, is KEPT and copied back exactly; glare and small flat patches are not;
+- optionally (--masks sam, experimental) SAM 2 video segmentation tracks the table
+  and room through each 2 s chunk from points that mask is sure about; the
+  copy-back edge is blended with a guided filter;
 - the rest (table and room) is repainted by the structure-locked diffusion
   restyle of tools/sim2real_augment.py, guided by that depth and the image's own
   edges, with prompts for other tables, rooms and lighting.
 
 Output is a LeRobot dataset in the real dataset's exact format with every
-original episode plus a restyled copy of a share of them (states, actions,
-velocities and efforts copied unchanged). Rendering resumes like the sim export.
+original episode plus restyled copies (by default two per demo, one realistic and
+one wild look); states, actions, velocities and efforts are copied unchanged.
+Rendering resumes like the sim export. Restyled copies keep their depth and masks
+(maps.npz) so `relight` can add lighting and shadow changes later without diffusion.
 
     python tools/augment_real_dataset.py preview --output outputs/real_aug_preview.jpg
+    # every demo + a realistic and a wild restyled copy of each, no lighting change yet
     python tools/augment_real_dataset.py export --output /workspace/real_aug/lerobot \\
-        --work /workspace/real_aug/rendered --fraction 0.5 --workers 4
+        --work /workspace/real_aug/rendered --copies 2 --workers 4
+    # then lighting and shadows without diffusion (CPU, uses the stored depth and masks)
+    python tools/augment_real_dataset.py relight --source /workspace/real_aug/lerobot \\
+        --output /workspace/real_aug/lerobot_relit --work /workspace/real_aug/relit
 """
 from __future__ import annotations
 
@@ -43,6 +52,7 @@ REAL = 'FoxNerdSaysMoo/panthera-gear-carrier-pin-real-20hz'
 CAMERAS = ('overhead', 'wrist_port2', 'wrist_port3')
 NUMERIC = ('observation.state', 'action', 'observation.velocity', 'observation.effort')
 DEPTH_MODEL = 'depth-anything/Depth-Anything-V2-Small-hf'
+SAM_MODEL = 'facebook/sam2.1-hiera-tiny'
 SCENES = ('a light maple butcher-block table in a university lab', 'a dark walnut wooden desk in a home office',
           'a white laminate workbench in a bright clean room', 'a grey steel workbench in a machine shop',
           'a black rubber mat on a workshop table', 'a pale plywood table in a cluttered garage',
@@ -67,7 +77,9 @@ NEGATIVE = ('cartoon, 3d render, cgi, illustration, painting, text, watermark, e
 # teaches the policy that the background does not matter.
 REALISTIC_SHARE = .5
 REALISTIC_PALETTES = ('grey and white', 'light wood', 'dark wood', 'charcoal black', 'beige and cream',
-                      'cool grey', 'brown and tan', 'off-white')
+                      'cool grey', 'brown and tan', 'off-white', 'sage green', 'navy blue', 'terracotta',
+                      'slate blue', 'olive green', 'burgundy', 'muted teal', 'warm brown', 'dusty blue',
+                      'mustard and grey')
 WILD_PALETTES = ('teal and white', 'deep blue', 'forest green', 'warm red', 'pastel pink', 'navy and orange',
                  'purple', 'mustard yellow', 'neon blue')
 
@@ -82,19 +94,24 @@ def is_realistic(seed: int) -> bool:
     return bool(np.random.default_rng([seed, 7]).random() < REALISTIC_SHARE)
 
 
-def scramble_background(frames_rgb, keep, seed: int):
+def scramble_background(frames_rgb, keep, seed: int, realistic: bool | None = None):
     """Replace the table and room with a random colour field or texture (one per episode),
     so the restyle starts from a new palette instead of the original wood."""
+    realistic = is_realistic(seed) if realistic is None else realistic
     rng = np.random.default_rng(seed)
     count, height, width = keep.shape
     y, x = np.mgrid[0:height, 0:width].astype(np.float32) / max(height, width)
     hsv = lambda h, s, v: cv2.cvtColor(np.uint8([[[h, s, v]]]), cv2.COLOR_HSV2RGB)[0, 0].astype(np.float32)
-    if is_realistic(seed):
-        # Everyday surfaces: neutral greys/whites/blacks, or wood and desk tones.
-        if rng.random() < .5:
+    if realistic:
+        # Everyday surfaces: neutral greys/whites/blacks, wood and desk tones, or muted
+        # colours (painted desks, cutting mats, laminate).
+        pick = rng.random()
+        if pick < .35:
             first = hsv(rng.integers(0, 180), rng.integers(0, 25), rng.integers(30, 235))
-        else:
+        elif pick < .65:
             first = hsv(rng.integers(8, 22), rng.integers(40, 150), rng.integers(50, 220))
+        else:
+            first = hsv(rng.integers(0, 180), rng.integers(35, 120), rng.integers(50, 200))
         second = np.clip(first * rng.uniform(.75, 1.15), 0, 255)
         kind = str(rng.choice(['solid', 'gradient', 'planks', 'blotches']))
     else:
@@ -120,7 +137,7 @@ def scramble_background(frames_rgb, keep, seed: int):
     texture = np.clip(texture, 0, 255).astype(np.uint8)
     out = frames_rgb.copy()
     out[~keep] = np.broadcast_to(texture, frames_rgb.shape)[~keep]
-    return out, f"{'realistic' if is_realistic(seed) else 'wild'} {kind}"
+    return out, f"{'realistic' if realistic else 'wild'} {kind}"
 
 
 # ---------------------------------------------------------------- masks -----
@@ -159,15 +176,19 @@ def table_surface(disparity, table, grid=64, sigma=4.):
     return cv2.resize(surface, (width, height), interpolation=cv2.INTER_LINEAR)
 
 
-def keep_mask(image_bgr, disparity, margin=.06):
-    """Pixels to copy back unchanged: everything rising above the table, or not table-coloured and not farther."""
+def keep_mask(image_bgr, disparity, margin=.06, details=False):
+    """Pixels to copy back unchanged: everything rising above the table, or not table-coloured and not farther.
+
+    With `details`, also returns the height above the table surface and the table-coloured pixels.
+    """
     lo, hi = np.percentile(disparity, [1, 99])
     disparity = (disparity - lo) / max(hi - lo, 1e-6)
     hsv = cv2.cvtColor(cv2.GaussianBlur(image_bgr, (5, 5), 0), cv2.COLOR_BGR2HSV)
     bright = cv2.dilate(((hsv[..., 2] > 235) & (hsv[..., 1] < 45)).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
     table = table_colour(image_bgr)
     if table.sum() < 200:  # no visible table: keep everything rather than guess
-        return np.ones(disparity.shape, bool)
+        keep = np.ones(disparity.shape, bool)
+        return (keep, np.zeros_like(disparity), table) if details else keep
     surface = table_surface(disparity, table)
     residual = disparity - surface
     # Glare lies flat on the table; bright white things that rise from it (fingers) are objects.
@@ -190,7 +211,127 @@ def keep_mask(image_bgr, disparity, margin=.06):
     # pixels into them changes what they look like.
     count, labels, stats, _ = cv2.connectedComponentsWithStats(keep)
     small = np.isin(labels, [i for i in range(1, count) if stats[i, 4] < 600])
-    return (keep.astype(bool) | cv2.dilate(small.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool))
+    keep = keep.astype(bool) | cv2.dilate(small.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+    return (keep, residual, table) if details else keep
+
+
+def spread_points(region, count, radius=20, min_clearance=4.):
+    """Up to `count` (x, y) points deep inside `region`, at least `radius` apart."""
+    distance = cv2.distanceTransform(region.astype(np.uint8), cv2.DIST_L2, 5)
+    points = []
+    for _ in range(count):
+        y, x = np.unravel_index(np.argmax(distance), distance.shape)
+        if distance[y, x] < min_clearance:
+            break
+        points.append([float(x), float(y)])
+        cv2.circle(distance, (int(x), int(y)), radius, 0, -1)
+    return points
+
+
+class TableTracker:
+    """SAM 2 video segmentation of the table and the room, prompted from the depth/colour mask.
+
+    The heuristic mask is right about most pixels but noisy at the edges and from frame
+    to frame. On a few frames per episode, points it is sure about (flat table far from
+    any object; clearly raised objects) prompt SAM 2, which then follows the table and
+    the room through the whole video.
+    """
+
+    def __init__(self, model=SAM_MODEL):
+        import torch
+        from transformers import Sam2VideoModel, Sam2VideoProcessor
+        self.torch = torch
+        self.device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+        self.model = Sam2VideoModel.from_pretrained(model).to(self.device).eval()
+        self.processor = Sam2VideoProcessor.from_pretrained(model)
+
+    def __call__(self, frames_rgb, prompts):
+        """`prompts` maps frame index -> (keep, residual, table) from keep_mask(details=True).
+
+        Each prompted frame starts a session that tracks up to the next prompted frame.
+        Returns the background (table or room) per frame, with None for frames whose
+        prompt frame had no confident table.
+        """
+        torch = self.torch
+        count, height, width = frames_rgb.shape[:3]
+        starts = sorted(prompts)
+        background = [None] * count
+        for start, stop in zip(starts, starts[1:] + [count]):
+            keep, residual, table = prompts[start]
+            near_object = cv2.dilate(keep.astype(np.uint8), np.ones((15, 15), np.uint8)).astype(bool)
+            raised = spread_points(keep & (residual > .06), 6, radius=15)
+            table_points = spread_points(table & (np.abs(residual) < .03) & ~near_object, 6)
+            room_points = spread_points(~table & ~near_object & (residual < -.1), 3)
+            if not table_points:
+                continue
+            session = self.processor.init_video_session(video=list(frames_rgb[start:stop]),
+                                                        inference_device=self.device, video_storage_device='cpu')
+            for obj, positive in ((1, table_points), (2, room_points)):
+                if positive:
+                    self.processor.add_inputs_to_inference_session(
+                        session, frame_idx=0, obj_ids=obj, input_points=[[positive + raised]],
+                        input_labels=[[[1] * len(positive) + [0] * len(raised)]])
+                    with torch.inference_mode():  # one object at a time: each add replaces the pending list
+                        self.model(inference_session=session, frame_idx=0)
+            with torch.inference_mode():
+                for out in self.model.propagate_in_video_iterator(session, start_frame_idx=0):
+                    masks = self.processor.post_process_masks([out.pred_masks], original_sizes=[[height, width]],
+                                                              binarize=True)[0]
+                    background[start + out.frame_idx] = masks.any(0).reshape(height, width).cpu().numpy()
+        return background
+
+
+def refine_keep(keep, residual, background, margin=.06):
+    """Keep what SAM 2 does not call table or room, plus anything clearly raised above the table."""
+    out = ~background | (keep & (residual > margin))
+    out = cv2.morphologyEx(out.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(out)
+    small = np.isin(labels, [i for i in range(1, count) if stats[i, 4] < 600])
+    # A thin margin around small parts, so the restyle does not eat into the pin.
+    return out.astype(bool) | cv2.dilate(small.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+
+
+PROMPT_EVERY = 40  # frames between SAM 2 prompts (2 s at 20 Hz)
+
+
+def track_keep(tracker, frames_rgb, disparity, wanted=None):
+    """Keep masks for the `wanted` frames (default all): the depth/colour heuristic,
+    refined by SAM 2 when a tracker is given and it found the table.
+
+    `disparity` maps frame index -> depth estimate; it needs the wanted frames and,
+    with a tracker, every PROMPT_EVERY-th frame.
+    """
+    wanted = range(len(frames_rgb)) if wanted is None else wanted
+    details = {i: keep_mask(cv2.cvtColor(frames_rgb[i], cv2.COLOR_RGB2BGR), disparity[i], details=True)
+               for i in sorted(set(wanted) | (set(range(0, len(frames_rgb), PROMPT_EVERY)) if tracker else set()))}
+    background = None if tracker is None else \
+        tracker(frames_rgb, {i: details[i] for i in range(0, len(frames_rgb), PROMPT_EVERY)})
+    if background is None:
+        return np.stack([details[i][0] for i in wanted])
+    return np.stack([details[i][0] if background[i] is None else refine_keep(details[i][0], details[i][1], background[i])
+                     for i in wanted])
+
+
+def guided_alpha(image_rgb, keep, radius=4, eps=1e-3):
+    """Soft copy-back weight: the hard mask snapped to the image's own edges (a guided filter)."""
+    guide = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255
+    p = keep.astype(np.float32)
+    box = lambda x: cv2.boxFilter(x, -1, (2 * radius + 1,) * 2)
+    mean_i, mean_p = box(guide), box(p)
+    a = (box(guide * p) - mean_i * mean_p) / (box(guide * guide) - mean_i ** 2 + eps)
+    b = mean_p - a * mean_i
+    alpha = np.clip(box(a) * guide + box(b), 0, 1)
+    # Inside the mask stays exactly the original; only the edge band is blended.
+    inside = cv2.erode(keep.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    return np.where(inside, 1., alpha)
+
+
+def soft_composite(original_rgb, restyled_rgb, keep):
+    out = np.empty_like(restyled_rgb)
+    for i, (o, r, k) in enumerate(zip(original_rgb, restyled_rgb, keep)):
+        alpha = guided_alpha(o, k)[..., None]
+        out[i] = np.clip(alpha * o + (1 - alpha) * r, 0, 255).astype(np.uint8)
+    return out
 
 
 class Depth:
@@ -304,7 +445,8 @@ def fetch(root: Path, revision: str | None):
 def episode_rows(root: Path, episode: int):
     """Numeric arrays and JPEG bytes per camera for one real episode."""
     import pyarrow.parquet as pq
-    meta = pq.read_table(next(root.glob('meta/episodes/*/*.parquet'))).to_pandas()
+    import pandas as pd
+    meta = pd.concat([pq.read_table(f).to_pandas() for f in sorted(root.glob('meta/episodes/*/*.parquet'))])
     row = meta[meta['episode_index'] == episode].iloc[0]
     path = root / f"data/chunk-{int(row['data/chunk_index']):03d}/file-{int(row['data/file_index']):03d}.parquet"
     table = pq.read_table(path).to_pandas()
@@ -355,48 +497,62 @@ def restyle_settings(args):
                     prompts=prompts(), negative=NEGATIVE)
 
 
-def render_job(root, dest, episode, restyle_seed, settings, args_relight=True, args_scramble=True):
-    """Write one output episode's JPEGs (original bytes, or restyled) and its image stats."""
+MAP_SIZE = 128  # stored depth resolution for the later lighting pass
+
+
+def save_maps(path, maps):
+    """Per camera: kept-pixel masks (bit-packed) and depth (uint8, MAP_SIZE), for `relight`."""
+    out = {}
+    for camera, (keep, disparity) in maps.items():
+        lo, hi = np.percentile(disparity, [1, 99])
+        d = np.clip((disparity - lo) / max(hi - lo, 1e-6), 0, 1)
+        out[f'{camera}_disparity'] = np.stack([cv2.resize(x, (MAP_SIZE, MAP_SIZE), interpolation=cv2.INTER_AREA)
+                                               for x in d.astype(np.float32)]) * 255
+        out[f'{camera}_disparity'] = out[f'{camera}_disparity'].astype(np.uint8)
+        out[f'{camera}_keep'] = np.packbits(keep, axis=-1)
+        out[f'{camera}_shape'] = np.array(keep.shape)
+    np.savez_compressed(path, **out)
+
+
+def load_maps(path):
+    with np.load(path) as z:
+        maps = {}
+        for camera in CAMERAS:
+            count, height, width = z[f'{camera}_shape']
+            keep = np.unpackbits(z[f'{camera}_keep'], axis=-1, count=width).astype(bool)
+            disparity = np.stack([cv2.resize(d, (width, height), interpolation=cv2.INTER_LINEAR)
+                                  for d in z[f'{camera}_disparity'].astype(np.float32) / 255])
+            maps[camera] = (keep, disparity)
+    return maps
+
+
+def compute_maps(frames_by_camera, masks='depth'):
+    """Depth and kept-pixel masks per camera (loads the models once per process)."""
+    global depth_model, tracker
+    if 'depth_model' not in globals():
+        depth_model = Depth()
+    if 'tracker' not in globals():
+        tracker = TableTracker() if masks == 'sam' else None
+    maps = {}
+    for camera, frames in frames_by_camera.items():
+        disparity = depth_model(frames)
+        maps[camera] = (track_keep(tracker, frames, disparity), disparity)
+    return maps
+
+
+def write_folder(root, dest, numeric, frames_or_jpegs, report):
+    """One output episode folder: JPEGs per camera, numeric arrays, image stats, done.json."""
     import pickle
     from lerobot.datasets.compute_stats import compute_episode_stats
-    global depth_model, restyler
-    shutil.rmtree(dest, ignore_errors=True)
-    dest.mkdir(parents=True)
-    numeric, images = episode_rows(root, episode)
     count = len(numeric['action'])
-    report = dict(source_episode=episode, frames=count, restyled=restyle_seed is not None)
-    for camera in CAMERAS:
-        (dest / camera).mkdir()
-        if restyle_seed is None:
-            for i, jpeg in enumerate(images[camera]):
-                (dest / camera / f'{i:05d}.jpg').write_bytes(jpeg)
-            continue
-        if 'depth_model' not in globals():
-            from tools.sim2real_augment import Restyler
-            depth_model, restyler = Depth(), Restyler(settings)
-        frames = decode(images[camera])
-        disparity = depth_model(frames)
-        keep = np.stack([keep_mask(cv2.cvtColor(f, cv2.COLOR_RGB2BGR), d) for f, d in zip(frames, disparity)])
-        source = frames
-        if args_scramble:  # new palette for the table and room; kept pixels stay the originals
-            source, report['scramble'] = scramble_background(frames, keep, restyle_seed)
-        from dataclasses import replace
-        restyler.settings = replace(settings, prompts=prompts(is_realistic(restyle_seed)))
-        restyled = restyler.episode(source, None, None, keep, restyle_seed, camera, ~keep,
-                                    controls=controls(frames, disparity, keep))
-        if args_relight:
-            look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
-            restyled = relight(restyled, disparity, look, keep)
-            report['lighting'] = look
-        report[f'{camera}_kept_share'] = float(keep.mean())
-        for i, frame in enumerate(restyled):
-            cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
-                        [cv2.IMWRITE_JPEG_QUALITY, 92])
-    if restyle_seed is not None:
-        chosen = prompts(is_realistic(restyle_seed))
-        report.update(restyle_seed=restyle_seed, prompt=chosen[restyle_seed % len(chosen)],
-                      realistic=is_realistic(restyle_seed),
-                      restyle_settings={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+    for camera, frames in frames_or_jpegs.items():
+        (dest / camera).mkdir(exist_ok=True)
+        for i, frame in enumerate(frames):
+            if isinstance(frame, bytes):
+                (dest / camera / f'{i:05d}.jpg').write_bytes(frame)
+            else:
+                cv2.imwrite(str(dest / camera / f'{i:05d}.jpg'), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
+                            [cv2.IMWRITE_JPEG_QUALITY, 92])
     image_features = {k: v for k, v in real_features(root).items() if v['dtype'] == 'image'}
     buffer = {key: [str(dest / key.rsplit('.', 1)[-1] / f'{j:05d}.jpg') for j in range(count)]
               for key in image_features}
@@ -405,53 +561,68 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=True, a
     (dest / 'done.json').write_text(json.dumps(report) + '\n')
 
 
-def export(args):
+def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='depth',
+               soft_edges=True, realistic=None):
+    """Write one output episode (original JPEG bytes, or restyled frames) with its image stats.
+
+    Restyled episodes also keep their depth and masks (maps.npz) for the `relight` pass.
+    """
+    global restyler
+    from dataclasses import replace
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+    numeric, images = episode_rows(root, episode)
+    report = dict(source_episode=episode, frames=len(numeric['action']), restyled=restyle_seed is not None)
+    if restyle_seed is None:
+        write_folder(root, dest, numeric, images, report)
+        return
+    if 'restyler' not in globals():
+        from tools.sim2real_augment import Restyler
+        restyler = Restyler(settings)
+    realistic = is_realistic(restyle_seed) if realistic is None else realistic
+    frames = {camera: decode(images[camera]) for camera in CAMERAS}
+    maps = compute_maps(frames, masks)
+    look = sample_lighting(restyle_seed)  # same lighting for all three cameras of the episode
+    out = {}
+    for camera in CAMERAS:
+        keep, disparity = maps[camera]
+        source = frames[camera]
+        if args_scramble:  # new palette for the table and room; kept pixels stay the originals
+            source, report['scramble'] = scramble_background(frames[camera], keep, restyle_seed, realistic)
+        restyler.settings = replace(settings, prompts=prompts(realistic))
+        restyled = restyler.episode(source, None, None, keep, restyle_seed, camera, ~keep,
+                                    controls=controls(frames[camera], disparity, keep))
+        if soft_edges:
+            restyled = soft_composite(frames[camera], restyled, keep)
+        if args_relight:
+            restyled = relight(restyled, disparity, look, keep)
+            report['lighting'] = look
+        report[f'{camera}_kept_share'] = float(keep.mean())
+        out[camera] = restyled
+    save_maps(dest / 'maps.npz', maps)
+    chosen = prompts(realistic)
+    report.update(restyle_seed=restyle_seed, prompt=chosen[restyle_seed % len(chosen)], masks=masks,
+                  soft_edges=soft_edges, realistic=realistic,
+                  restyle_settings={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+    write_folder(root, dest, numeric, out, report)
+
+
+def write_dataset(info_root, output, dests, provenance, keep_jpegs=False):
+    """Collect finished episode folders into one LeRobot dataset in the real dataset's format."""
     import pickle
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
-    revision = fetch(args.root, args.revision)
-    info = json.loads((args.root / 'meta/info.json').read_text())
-    episodes = list(range(info['total_episodes']))[:args.limit or None]
-    rng = np.random.default_rng(args.seed)
-    restyled = sorted(rng.choice(episodes, size=round(len(episodes) * args.fraction), replace=False).tolist()) \
-        if args.fraction else []
-    items = [(e, None) for e in episodes] if args.include_originals else []
-    items += [(e, args.seed * 100003 + e) for e in restyled]
-    settings = restyle_settings(args)
-    args.work.mkdir(parents=True, exist_ok=True)
-    contract = dict(source=REAL, revision=revision, items=items,
-                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight,
-                    scramble=args.scramble)
-    contract_path = args.work / 'settings.json'
-    if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
-        raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
-    contract_path.write_text(json.dumps(contract, indent=2) + '\n')
-    dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else '_restyled')) for e, s in items]
-    todo = [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]
-    print(f'{len(items) - len(todo)} of {len(items)} episodes ready; rendering {len(todo)} '
-          f'({len(restyled)} restyled copies)', flush=True)
-    started = time.time()
-    with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
-        futures = {pool.submit(render_job, args.root, dests[i], items[i][0], items[i][1], settings, args.relight,
-                               args.scramble): i
-                   for i in todo}
-        for k, future in enumerate(as_completed(futures), 1):
-            future.result()
-            elapsed = time.time() - started
-            print(json.dumps(dict(rendered=k, of=len(todo), elapsed_s=round(elapsed),
-                                  eta_h=round(elapsed / k * (len(todo) - k) / 3600, 2))), flush=True)
-    shutil.rmtree(args.output, ignore_errors=True)
-    task = json.loads(json.dumps(__import__('pyarrow.parquet', fromlist=['x']).read_table(
-        args.root / 'meta/tasks.parquet').to_pandas().index.tolist()))[0]
-    dataset = LeRobotDataset.create(repo_id='local/panthera_real_augmented', root=args.output, fps=info['fps'],
+    info = json.loads((info_root / 'meta/info.json').read_text())
+    shutil.rmtree(output, ignore_errors=True)
+    task = __import__('pyarrow.parquet', fromlist=['x']).read_table(
+        info_root / 'meta/tasks.parquet').to_pandas().index.tolist()[0]
+    dataset = LeRobotDataset.create(repo_id='local/panthera_real_augmented', root=output, fps=info['fps'],
                                     robot_type=info.get('robot_type', 'panthera_ht_bimanual_real'),
-                                    features=real_features(args.root), use_videos=False, image_writer_threads=0,
+                                    features=real_features(info_root), use_videos=False, image_writer_threads=0,
                                     metadata_buffer_size=20)
     reports, total = {}, 0
     try:
-        for (episode, seed), dest in zip(items, dests):
-            report = json.loads((dest / 'done.json').read_text())
-            reports[dest.name] = report
+        for dest in dests:
+            reports[dest.name] = json.loads((dest / 'done.json').read_text())
             with np.load(dest / 'numeric.npz') as numeric:
                 n = len(numeric['action'])
                 buffer = dataset.episode_buffer
@@ -465,53 +636,169 @@ def export(args):
     finally:
         dataset.finalize()
         dataset.stop_image_writer()
-    provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py',
-                      method='table/background restyle; robot, parts and hands copied back from the real frames',
-                      depth_model=DEPTH_MODEL, include_originals=args.include_originals,
-                      restyled_source_episodes=restyled, episodes=reports,
-                      restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
-    (args.output / 'meta/provenance.json').write_text(json.dumps(provenance, indent=2, default=str) + '\n')
-    (args.output / 'COMPLETE').write_text(f'{len(items)} episodes, {total} frames\n')
-    if not args.keep_jpegs:
+    (output / 'meta/provenance.json').write_text(json.dumps(dict(provenance, episodes=reports), indent=2,
+                                                            default=str) + '\n')
+    (output / 'COMPLETE').write_text(f'{len(dests)} episodes, {total} frames\n')
+    if not keep_jpegs:
         for dest in dests:
             for camera in CAMERAS:
                 shutil.rmtree(dest / camera, ignore_errors=True)
-    print(f'complete: {len(items)} episodes ({len(restyled)} restyled), {total} frames at {args.output}')
+    return total
+
+
+def run_jobs(job, calls, workers):
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        futures = [pool.submit(job, *call) for call in calls]
+        started = time.time()
+        for k, future in enumerate(as_completed(futures), 1):
+            future.result()
+            elapsed = time.time() - started
+            print(json.dumps(dict(rendered=k, of=len(calls), elapsed_s=round(elapsed),
+                                  eta_h=round(elapsed / k * (len(calls) - k) / 3600, 2))), flush=True)
+
+
+def export(args):
+    revision = fetch(args.root, args.revision)
+    info = json.loads((args.root / 'meta/info.json').read_text())
+    episodes = list(range(info['total_episodes']))[:args.limit or None]
+    rng = np.random.default_rng(args.seed)
+    restyled = sorted(rng.choice(episodes, size=round(len(episodes) * args.fraction), replace=False).tolist()) \
+        if args.fraction else []
+    # (episode, restyle seed, realistic look, copy); copies alternate realistic / wild when balanced.
+    items = [(e, None, None, None) for e in episodes] if args.include_originals else []
+    items += [(e, args.seed * 100003 + e + 1000003 * k, (k % 2 == 0) if args.balanced else None, k)
+              for k in range(args.copies) for e in restyled]
+    settings = restyle_settings(args)
+    args.work.mkdir(parents=True, exist_ok=True)
+    contract = dict(source=REAL, revision=revision, items=items,
+                    restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight,
+                    scramble=args.scramble, masks=args.masks, soft_edges=args.soft_edges,
+                    palettes=[REALISTIC_PALETTES, WILD_PALETTES])
+    contract_path = args.work / 'settings.json'
+    if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
+        raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
+    contract_path.write_text(json.dumps(contract, indent=2) + '\n')
+    dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k in items]
+    todo = [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]
+    print(f'{len(items) - len(todo)} of {len(items)} episodes ready; rendering {len(todo)} '
+          f'({len(restyled) * args.copies} restyled copies)', flush=True)
+    run_jobs(render_job, [(args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
+                           args.masks, args.soft_edges, items[i][2]) for i in todo], args.workers)
+    provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py export',
+                      method='table/background restyle; robot, parts and hands copied back from the real frames',
+                      depth_model=DEPTH_MODEL, masks=args.masks, soft_edges=args.soft_edges,
+                      sam_model=SAM_MODEL if args.masks == 'sam' else None, relight=args.relight,
+                      include_originals=args.include_originals, restyled_source_episodes=restyled,
+                      copies=args.copies, balanced=args.balanced, work=str(args.work),
+                      restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+    total = write_dataset(args.root, args.output, dests, provenance, args.keep_jpegs)
+    print(f'complete: {len(items)} episodes ({len(restyled) * args.copies} restyled), {total} frames at {args.output}')
+
+
+def relight_job(source, index, maps_path, dest, look_seed, masks):
+    """One output episode of the lighting pass: the source episode as is, or relit."""
+    shutil.rmtree(dest, ignore_errors=True)
+    dest.mkdir(parents=True)
+    numeric, images = episode_rows(source, index)
+    report = dict(source_index=index, frames=len(numeric['action']), relit=look_seed is not None)
+    if look_seed is None:
+        write_folder(source, dest, numeric, images, report)
+        return
+    frames = {camera: decode(images[camera]) for camera in CAMERAS}
+    maps = load_maps(maps_path) if maps_path and Path(maps_path).exists() else compute_maps(frames, masks)
+    look = sample_lighting(look_seed)
+    out = {camera: relight(frames[camera], maps[camera][1], look, maps[camera][0]) for camera in CAMERAS}
+    report.update(lighting=look, look_seed=look_seed, maps='stored' if maps_path and Path(maps_path).exists()
+                  else f'computed ({masks})')
+    write_folder(source, dest, numeric, out, report)
+
+
+def relight_dataset(args):
+    """Lighting and shadow changes (no diffusion) on a finished dataset: every source episode
+    as is, plus `--variants` relit copies of a `--fraction` of them."""
+    provenance = json.loads((args.source / 'meta/provenance.json').read_text()) \
+        if (args.source / 'meta/provenance.json').exists() else {}
+    names = list(provenance.get('episodes', {}))
+    info = json.loads((args.source / 'meta/info.json').read_text())
+    count = info['total_episodes']
+    if names and len(names) != count:
+        raise SystemExit(f'{args.source}: provenance lists {len(names)} episodes, dataset has {count}')
+    work = Path(provenance.get('work', '')) if args.maps is None else args.maps
+    rng = np.random.default_rng(args.seed)
+    chosen = sorted(rng.choice(count, size=round(count * args.fraction), replace=False).tolist())
+    items = [(i, None) for i in range(count)] if args.include_source else []
+    items += [(i, args.seed * 100003 + i + 1000003 * v) for v in range(args.variants) for i in chosen]
+    maps_for = lambda i: str(work / names[i] / 'maps.npz') if names else None
+    missing = sum(1 for i, s in items if s is not None and not (maps_for(i) and Path(maps_for(i)).exists()))
+    print(f'{len(items)} output episodes ({len(items) - len(chosen) * args.variants} as is, '
+          f'{len(chosen) * args.variants} relit; {missing} need depth and masks computed)', flush=True)
+    args.work.mkdir(parents=True, exist_ok=True)
+    dests = [args.work / (f'episode_{i:04d}' + ('' if s is None else f'_lit{(s - args.seed * 100003 - i) // 1000003}'))
+             for i, s in items]
+    todo = [k for k, d in enumerate(dests) if not (d / 'done.json').exists()]
+    run_jobs(relight_job, [(args.source, items[k][0], maps_for(items[k][0]), dests[k], items[k][1], args.masks)
+                           for k in todo], args.workers)
+    total = write_dataset(args.source, args.output, dests,
+                          dict(source=str(args.source), source_provenance={k: v for k, v in provenance.items()
+                                                                           if k != 'episodes'},
+                               generator='tools/augment_real_dataset.py relight', variants=args.variants,
+                               fraction=args.fraction, include_source=args.include_source,
+                               source_names=names), args.keep_jpegs)
+    print(f'complete: {len(items)} episodes, {total} frames at {args.output}')
 
 
 def preview(args):
-    """A few frames per camera: original | kept pixels | restyled."""
+    """A few frames per camera: original | restyle input | restyled | restyled + relit.
+
+    With --masks compare: original | depth mask | SAM 2 mask (blue = repainted), and with
+    the restyle also each mask's relit result.
+    """
     revision = fetch(args.root, args.revision)
+    from dataclasses import replace
     from tools.sim2real_augment import Restyler
     settings = restyle_settings(args)
     depth_model = Depth()
+    tracker = None if args.masks == 'depth' else TableTracker()
     restyler = None if args.no_restyle else Restyler(settings)
-    from dataclasses import replace
+    variants = dict(depth=['depth'], sam=['sam'], compare=['depth', 'sam'])[args.masks]
     rows = []
     for k, episode in enumerate(args.episodes):
         _, images = episode_rows(args.root, episode)
+        seed = args.seed + k
         for camera in CAMERAS:
-            pick = np.linspace(0, len(images[camera]) - 1, args.frames + 2)[1:-1].astype(int)
-            frames = decode([images[camera][i] for i in pick])
-            disparity = depth_model(frames)
-            keep = np.stack([keep_mask(cv2.cvtColor(f, cv2.COLOR_RGB2BGR), d) for f, d in zip(frames, disparity)])
-            shown = frames.copy()
-            shown[~keep] = (shown[~keep] * .3 + np.array([0, 80, 255]) * .4).astype(np.uint8)
-            columns = [frames, shown]
-            if restyler is not None:
-                restyler.settings = replace(settings, carry_static=False)
-                source = scramble_background(frames, keep, args.seed + k)[0] if args.scramble else frames
-                restyler.settings = replace(settings, carry_static=False, prompts=prompts(is_realistic(args.seed + k)))
-                restyled = restyler.episode(source, None, None, keep, args.seed + k, camera, ~keep,
-                                            controls=controls(frames, disparity, keep))
-                columns = [frames, source, restyled, relight(restyled, disparity, sample_lighting(args.seed + k), keep)]
-            for i in range(len(frames)):
+            frames = decode(images[camera])
+            pick = np.linspace(0, len(frames) - 1, args.frames + 2)[1:-1].astype(int).tolist()
+            need = sorted(set(pick) | (set(range(0, len(frames), PROMPT_EVERY)) if tracker else set()))
+            disparity = dict(zip(need, depth_model(frames[need])))
+            shown, picked_disparity = frames[pick], np.stack([disparity[i] for i in pick])
+            columns = [shown]
+            for variant in variants:
+                keep = track_keep(tracker if variant == 'sam' else None, frames, disparity, pick)
+                if restyler is None or len(variants) > 1:
+                    overlay = shown.copy()
+                    overlay[~keep] = (overlay[~keep] * .3 + np.array([0, 80, 255]) * .4).astype(np.uint8)
+                    columns.append(overlay)
+                if restyler is None:
+                    continue
+                source = scramble_background(shown, keep, seed)[0] if args.scramble else shown
+                restyler.settings = replace(settings, carry_static=False, prompts=prompts(is_realistic(seed)))
+                restyled = restyler.episode(source, None, None, keep, seed, camera, ~keep,
+                                            controls=controls(shown, picked_disparity, keep))
+                if variant == 'sam' and args.soft_edges:
+                    restyled = soft_composite(shown, restyled, keep)
+                relit = relight(restyled, picked_disparity, sample_lighting(seed), keep)
+                columns += [relit] if len(variants) > 1 else [source, restyled, relit]
+            for i in range(len(shown)):
                 rows.append(np.concatenate([c[i] for c in columns], 1))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(args.output), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
-    print(f'wrote {args.output} (revision {revision[:8]}): columns '
-          + ('original, kept (blue = repainted)' if restyler is None else
-             'original, restyle input' + (' (scrambled)' if args.scramble else '') + ', restyled, restyled + relit'))
+    if len(variants) > 1:
+        names = 'original, depth mask, SAM 2 mask' + ('' if restyler is None else ', depth-mask result, SAM 2 result')
+    elif restyler is None:
+        names = 'original, kept (blue = repainted)'
+    else:
+        names = 'original, restyle input' + (' (scrambled)' if args.scramble else '') + ', restyled, restyled + relit'
+    print(f'wrote {args.output} (revision {revision[:8]}): columns {names}')
 
 
 def main():
@@ -528,25 +815,50 @@ def main():
     common.add_argument('--guidance', type=float, default=1.)
     common.add_argument('--depth-scale', type=float, default=.6)
     common.add_argument('--canny-scale', type=float, default=.6)
+    common.add_argument('--masks', choices=('sam', 'depth'), default='depth',
+                        help='depth: the depth/colour mask; sam: SAM 2 video tracking of the table, prompted by '
+                             'points from that mask (experimental: point prompts outline grain patches, not the '
+                             'whole table)')
+    common.add_argument('--hard-edges', dest='soft_edges', action='store_false',
+                        help='copy kept pixels back with a hard mask edge instead of a guided-filter blend')
     common.add_argument('--no-scramble', dest='scramble', action='store_false',
                         help='start the restyle from the original table instead of a random colour/texture')
     p = sub.add_parser('export', parents=[common])
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--work', type=Path, required=True, help='per-episode render folders (resumable)')
-    p.add_argument('--fraction', type=float, default=.5, help='share of episodes that get a restyled copy')
+    p.add_argument('--fraction', type=float, default=1., help='share of episodes that get restyled copies')
+    p.add_argument('--copies', type=int, default=2, help='restyled copies per chosen episode')
+    p.add_argument('--unbalanced', dest='balanced', action='store_false',
+                   help='pick each copy\'s look at random instead of alternating realistic / wild')
     p.add_argument('--no-originals', dest='include_originals', action='store_false')
-    p.add_argument('--no-relight', dest='relight', action='store_false',
-                   help='skip the whole-frame lighting change on restyled copies')
+    p.add_argument('--relight', action='store_true',
+                   help='also apply the lighting change here (default: leave it to the `relight` pass)')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--limit', type=int)
+    p.add_argument('--keep-jpegs', action='store_true')
+    p = sub.add_parser('relight', help='lighting/shadow variants of a finished dataset, no diffusion')
+    p.add_argument('--source', type=Path, required=True, help='a dataset written by `export` (or the real one)')
+    p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--work', type=Path, required=True, help='per-episode folders (resumable)')
+    p.add_argument('--maps', type=Path, help='export --work folder with maps.npz (default: from provenance)')
+    p.add_argument('--variants', type=int, default=1, help='relit copies per chosen episode')
+    p.add_argument('--fraction', type=float, default=1.)
+    p.add_argument('--no-source', dest='include_source', action='store_false',
+                   help='only the relit copies, not the source episodes as they are')
+    p.add_argument('--masks', choices=('sam', 'depth'), default='depth', help='for episodes without stored maps')
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--workers', type=int, default=8)
     p.add_argument('--keep-jpegs', action='store_true')
     p = sub.add_parser('preview', parents=[common])
     p.add_argument('--output', type=Path, default=ROOT / 'outputs/real_aug_preview.jpg')
     p.add_argument('--episodes', type=int, nargs='+', default=[0, 101])
     p.add_argument('--frames', type=int, default=2)
     p.add_argument('--no-restyle', action='store_true', help='masks only (no diffusion models)')
+    p.add_argument('--compare-masks', action='store_true', help='depth mask and SAM 2 mask side by side')
     args = parser.parse_args()
-    {'export': export, 'preview': preview}[args.command](args)
+    if getattr(args, 'compare_masks', False):
+        args.masks = 'compare'
+    {'export': export, 'preview': preview, 'relight': relight_dataset}[args.command](args)
 
 
 if __name__ == '__main__':
