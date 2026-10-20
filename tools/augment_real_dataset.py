@@ -752,7 +752,7 @@ def export(args):
     # (episode, restyle seed, realistic look, copy, wood cleanup); copies alternate realistic / wild when
     # balanced, and with --wood-cleanup both, cleanup alternates by episode and copy, so each demo has a
     # copy of each kind and each look gets half of each.
-    clean = lambda e, k: {'on': True, 'off': False}.get(args.wood_cleanup, (e + k) % 2 == 0)
+    clean = lambda e, k: {'on': True, 'off': False}.get(args.wood_cleanup, (e + k + k // 2) % 2 == 0)
     items = [(e, None, None, None, None) for e in episodes] if args.include_originals else []
     items += [(e, args.seed * 100003 + e + 1000003 * k, (k % 2 == 0) if args.balanced else None, k, clean(e, k))
               for k in range(args.copies) for e in restyled]
