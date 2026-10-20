@@ -806,6 +806,13 @@ def relight_job(source, index, maps_path, dest, look_seed, masks):
 def relight_dataset(args):
     """Lighting and shadow changes (no diffusion) on a finished dataset: every source episode
     as is, plus `--variants` relit copies of a `--fraction` of them."""
+    import pyarrow.parquet as pq
+    try:  # an export still writing its dataset leaves the episode index without a parquet footer
+        for f in args.source.glob('meta/episodes/*/*.parquet'):
+            pq.read_metadata(f)
+    except Exception:
+        raise SystemExit(f'{args.source} is still being written (unreadable episode index); '
+                         'wait for its COMPLETE file')
     provenance = json.loads((args.source / 'meta/provenance.json').read_text()) \
         if (args.source / 'meta/provenance.json').exists() else {}
     names = list(provenance.get('episodes', {}))
