@@ -47,11 +47,13 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from sim.actuator_env import TABLE_Z
 from tools.physics_replay import PhysicsReplay, assembled_offsets, grasps, pose_of, quat
 from tools.replay_real_in_sim import phases, transform
 
 # The carrier in the right grip_site frame, measured from 68 demonstrations' gear
 # releases (gear in its slot at release): mean position and mean rotation.
+FLOOR = .012  # m above the table that fingertips and a held gear's centre stay above
 CARRIER_GRIP = transform([-.0279, -.0054, .0214], [[-.88, .47, -.11], [-.45, -.72, .52], [.17, .51, .85]])
 
 
@@ -217,6 +219,17 @@ class GearInsertionEnv:
         can push the gear home with its closed fingertips."""
         r, m, d = self.replay, self.m, self.d
         move = np.clip(action[:3], -2, 2) / 1000
+        # Keep the fingertips and a held gear off the table: with the carrier held tilted, moves
+        # along its plane can point down. Trim the downward part of a move that would take the
+        # commanded fingertips or gear below the floor (the sideways part still happens).
+        carrier_rot = self.carrier()[:3, :3]
+        world = carrier_rot @ move
+        tip = self.commanded_grip()
+        low = min(tip[2, 3], (tip @ self.gear_grip)[2, 3] if not self.released else np.inf)
+        floor = TABLE_Z + FLOOR
+        if low + world[2] < floor:
+            world[2] = min(max(world[2], floor - low), .002)
+            move = carrier_rot.T @ world
         turn = np.radians(np.clip(action[3:6], -2, 2))
         if True:
             carrier = self.carrier()
@@ -228,7 +241,13 @@ class GearInsertionEnv:
             target[:3, 3] += carrier[:3, :3] @ move
             target[:3, :3] = carrier[:3, :3] @ Rotation.from_rotvec(turn).as_matrix() @ carrier[:3, :3].T @ grip[:3, :3]
             # At most 0.03 rad per joint per step: an unreachable target must not fling the gear.
-            self.q = self.q + np.clip(self.ik(target, self.q) - self.q, -.03, .03)
+            q_new = self.q + np.clip(self.ik(target, self.q) - self.q, -.03, .03)
+            # Backstop: a rotation or IK step must not sink the fingertips or gear well below the floor.
+            q_old, self.q = self.q, q_new
+            tip = self.commanded_grip()
+            low = min(tip[2, 3], (tip @ self.gear_grip)[2, 3] if not self.released else np.inf)
+            if low < TABLE_Z + FLOOR - .003:
+                self.q = q_old
             if action[6] > 0 and not self.released:
                 self.released = True
                 d.eq_active[r.weld['gear_3']] = 0
@@ -256,14 +275,17 @@ class GearInsertionEnv:
         return self.observation(), reward, seated, dict(slot_error_mm=pos, seated=seated)
 
 
-def scripted(env, max_steps=220, standoff_mm=15., half_mm=6., gear_radius_mm=12.):
+def scripted(env, max_steps=400, standoff_mm=15., half_mm=6., gear_radius_mm=12., tries=3, clear_mm=22.):
     """Privileged baseline doing what the real operators do (seen in the wrist videos):
     slide the gear edgewise into the slot in the carrier's rim, release it half in (the
-    slot holds it), back off, close the fingers, and push it home with the fingertips."""
+    slot holds it), back off, close the fingers, and push it home with the fingertips.
+    A push that stalls short of flush backs off and comes in again (up to `tries` pushes).
+    The approach goes around the carrier, not through it: out past the rim (`clear_mm`
+    beyond the slot) while out of the carrier's plane, into the plane, then in sideways."""
     outward = env.slot[:3, 3].copy()
     outward[2] = 0
     outward /= np.linalg.norm(outward)
-    stage, count = 'align', 0
+    stage, count, pushes = 'align', 0, 0
     for _ in range(max_steps):
         pos, _ = env.slot_error()
         rot = env.tilt_error()
@@ -274,21 +296,42 @@ def scripted(env, max_steps=220, standoff_mm=15., half_mm=6., gear_radius_mm=12.
         release, close = -1., -1.
         if stage == 'align':
             lined_up = np.linalg.norm(off_axis) < .4 and tilt < 1.5
-            if radial < standoff_mm - 2 and not lined_up:
+            height = pos[2]  # out of the carrier's plane (slot frame z)
+            sideways = off_axis - height * np.array([0., 0., 1.])
+            if abs(height) > 3 and radial < clear_mm:
+                # Out of the plane and over the carrier: move out past its rim first, at this height.
+                move = (clear_mm + 2 - radial) * .7 * outward - sideways * .5
+            elif abs(height) > 3:
+                # Clear of the rim: come into the carrier's plane.
+                move = -height * .7 * np.array([0., 0., 1.]) - sideways * .5 - (radial - clear_mm - 2) * .3 * outward
+            elif radial < standoff_mm - 2 and not lined_up:
                 move = (standoff_mm - radial) * .7 * outward * (np.linalg.norm(off_axis) > 1.5) - off_axis * .7
             else:
                 move = -off_axis * .7 - (radial - standoff_mm) * .3 * outward
             if lined_up and abs(radial - standoff_mm) < 1.5:
                 stage = 'insert'
+        elif env.released and np.linalg.norm(pos) > 60:
+            break  # the gear is gone
         elif stage == 'insert':
             move = -off_axis * .7 - min(radial - half_mm, 1.5) * outward
             if radial <= half_mm + .3:
-                stage, release = 'back_off', 1.
+                stage, release, count = 'open', 1., 0
         else:
             release = 1.
             turn = np.zeros(3)
             tip = env.grip_in_slot()
-            if stage == 'back_off':  # straight out, away from the gear's rim
+            if stage == 'open':  # let the fingers open around the gear before moving
+                goal = tip
+                count += 1
+                if count > 6:
+                    stage = 'lift'
+                    rel = np.linalg.inv(env.carrier() @ env.slot) @ env.replay.grip('left')
+                    lift_goal = tip - 20 * rel[:3, 0]  # back along the fingers, away from the gear
+            elif stage == 'lift':
+                goal = lift_goal
+                if np.linalg.norm(tip - goal) < 1.5:
+                    stage = 'back_off'
+            elif stage == 'back_off':  # out past the gear's rim
                 goal = pos + (gear_radius_mm + 12) * outward
                 close = -1.
                 if np.linalg.norm(tip - goal) < 1.5:
@@ -301,11 +344,18 @@ def scripted(env, max_steps=220, standoff_mm=15., half_mm=6., gear_radius_mm=12.
             elif stage == 'approach':  # fingertips just outside the gear's outer rim
                 goal, close = pos + (gear_radius_mm + 3) * outward, 1.
                 if np.linalg.norm(tip - goal) < 1.:
-                    stage, count = 'push', 0
+                    stage, count, last_radial = 'push', 0, radial
+                    pushes += 1
             elif stage == 'push':  # push inward until the gear is flush
                 goal, close = tip - 1. * outward, 1.
                 count += 1
-                if radial < .3 or count > 40:
+                stalled = count > 12 and radial > .3 and radial > last_radial - .05
+                last_radial = min(last_radial, radial) if count > 1 else radial
+                if radial < .3:
+                    stage, count = 'retreat', 0
+                elif (stalled or count > 40) and pushes < tries:
+                    stage = 'back_off'  # come in again from outside the rim
+                elif count > 40:
                     stage, count = 'retreat', 0
             else:  # retreat
                 goal, close = tip + 1.5 * outward, 1.
@@ -319,24 +369,36 @@ def scripted(env, max_steps=220, standoff_mm=15., half_mm=6., gear_radius_mm=12.
     return env.seated(), env.slot_error()[0]
 
 
+def _evaluate(args):
+    seed, demos, count, noise_mm, noise_deg = args
+    env = GearInsertionEnv(episodes=range(demos), noise_mm=noise_mm, noise_deg=noise_deg, seed=seed)
+    out = []
+    for _ in range(count):
+        env.reset()
+        start = float(np.linalg.norm(env.slot_error()[0]))
+        seated, final = scripted(env)
+        out.append((start, bool(seated), np.round(final, 1).tolist()))
+    return out
+
+
 def main():
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--episodes', type=int, default=20)
-    parser.add_argument('--demos', type=int, default=30, help='real demonstrations to draw starts from')
+    parser.add_argument('--episodes', type=int, default=40)
+    parser.add_argument('--demos', type=int, default=60, help='real demonstrations to draw starts from')
     parser.add_argument('--noise-mm', type=float, default=4.)
     parser.add_argument('--noise-deg', type=float, default=6.)
+    parser.add_argument('--workers', type=int, default=8)
     args = parser.parse_args()
-    env = GearInsertionEnv(episodes=range(args.demos), noise_mm=args.noise_mm, noise_deg=args.noise_deg)
-    print(f'{len(env.starts)} real starting poses')
-    wins = 0
-    for k in range(args.episodes):
-        env.reset()
-        start = np.linalg.norm(env.slot_error()[0])
-        seated, final = scripted(env)
-        wins += seated
-        print(f'episode {k}: start {start:.1f} mm from slot -> {"seated" if seated else "not seated"} '
-              f'(final {np.round(final, 1)} mm)', flush=True)
-    print(f'scripted baseline: {wins} of {args.episodes} seated')
+    per = -(-args.episodes // args.workers)
+    jobs = [(seed, args.demos, per, args.noise_mm, args.noise_deg) for seed in range(args.workers)]
+    with ProcessPoolExecutor(args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        results = [r for chunk in pool.map(_evaluate, jobs) for r in chunk]
+    for k, (start, seated, final) in enumerate(results):
+        print(f'episode {k}: start {start:.1f} mm from slot -> {"seated" if seated else "not seated"} (final {final} mm)')
+    wins = sum(seated for _, seated, _ in results)
+    print(f'scripted baseline: {wins} of {len(results)} seated ({100 * wins / len(results):.0f}%)')
 
 
 if __name__ == '__main__':
