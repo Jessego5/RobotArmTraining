@@ -9,9 +9,9 @@ so this only changes how the scene looks. Per frame:
   pixels; everything that rises above it (arms, grippers, fingers, carrier, gear,
   pin, operator hands), plus anything not wood-coloured that is not farther than
   the table, is KEPT and copied back exactly; glare and small flat patches are not;
-- the robot itself is rendered from each frame's recorded joint angles through the
-  cameras fitted to the demonstrations (sim/real_cameras.json) and always kept, so
-  no arm or gripper pixel is repainted (--masks depth skips this);
+- optionally (--masks robot, experimental) the robot is rendered from each frame's
+  recorded joint angles through the cameras fitted to the demonstrations
+  (sim/real_cameras.json) and kept too;
 - optionally (--masks sam, experimental) SAM 2 video segmentation tracks the table
   and room through each 2 s chunk from points that mask is sure about; the
   copy-back edge is blended with a guided filter;
@@ -569,7 +569,7 @@ def with_robot(frames_rgb, disparity, rendered, wanted=None):
     return np.stack(out)
 
 
-def compute_maps(frames_by_camera, masks='robot', states=None):
+def compute_maps(frames_by_camera, masks='depth', states=None):
     """Depth and kept-pixel masks per camera (loads the models once per process).
 
     masks: 'robot' = the depth/colour mask plus the rendered robot (needs `states`);
@@ -614,7 +614,7 @@ def write_folder(root, dest, numeric, frames_or_jpegs, report):
     (dest / 'done.json').write_text(json.dumps(report) + '\n')
 
 
-def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='robot',
+def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='depth',
                soft_edges=True, realistic=None):
     """Write one output episode (original JPEG bytes, or restyled frames) with its image stats.
 
@@ -877,11 +877,12 @@ def main():
     common.add_argument('--guidance', type=float, default=1.)
     common.add_argument('--depth-scale', type=float, default=.6)
     common.add_argument('--canny-scale', type=float, default=.6)
-    common.add_argument('--masks', choices=('robot', 'depth', 'sam'), default='robot',
-                        help='robot: the depth/colour mask plus the robot rendered from the recorded joint angles '
-                             'through the fitted cameras (sim/real_cameras.json); depth: the depth/colour mask '
-                             'alone; sam: SAM 2 video tracking of the table (experimental: its point prompts '
-                             'outline grain patches, not the whole table)')
+    common.add_argument('--masks', choices=('depth', 'robot', 'sam'), default='depth',
+                        help='depth: the depth/colour mask; robot (experimental): plus the robot rendered from the '
+                             'recorded joint angles through the fitted cameras (sim/real_cameras.json), which keeps '
+                             'every arm pixel but, with the wrist cameras still ~5 px off, also a rim of wood; '
+                             'sam (experimental): SAM 2 tracking of the table, whose point prompts outline grain '
+                             'patches, not the whole table')
     common.add_argument('--hard-edges', dest='soft_edges', action='store_false',
                         help='copy kept pixels back with a hard mask edge instead of a guided-filter blend')
     common.add_argument('--no-scramble', dest='scramble', action='store_false',
@@ -908,7 +909,7 @@ def main():
     p.add_argument('--fraction', type=float, default=1.)
     p.add_argument('--no-source', dest='include_source', action='store_false',
                    help='only the relit copies, not the source episodes as they are')
-    p.add_argument('--masks', choices=('robot', 'depth', 'sam'), default='robot',
+    p.add_argument('--masks', choices=('depth', 'robot', 'sam'), default='depth',
                    help='for episodes without stored maps')
     p.add_argument('--seed', type=int, default=1)
     p.add_argument('--workers', type=int, default=8)
