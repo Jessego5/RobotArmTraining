@@ -663,6 +663,37 @@ def write_folder(root, dest, numeric, frames_or_jpegs, report):
     (dest / 'done.json').write_text(json.dumps(report) + '\n')
 
 
+CLAIM_STALE_S = 2 * 3600  # a claim older than this (a crashed or stopped pod) can be taken over
+
+
+def claim(dest):
+    """May this process render `dest`? Not if it is finished, or another pod is rendering it.
+
+    Several pods can share one --work folder on the network volume: each episode is claimed
+    with an exclusive marker file before rendering. Claims from this same machine (an earlier,
+    stopped run) and stale claims are taken over.
+    """
+    import socket
+    if (dest / 'done.json').exists():
+        return False
+    mark = dest.parent / (dest.name + '.claim')
+    me = f'{socket.gethostname()}:{os.getpid()}'
+    try:
+        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, me.encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            owner, age = mark.read_text().split(':')[0], time.time() - mark.stat().st_mtime
+        except OSError:
+            return False
+        if owner == socket.gethostname() or age > CLAIM_STALE_S:
+            mark.write_text(me)
+            return True
+        return False
+
+
 def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True, masks='depth',
                soft_edges=True, realistic=None, clean=True):
     """Write one output episode (original JPEG bytes, or restyled frames) with its image stats.
@@ -671,6 +702,8 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
     """
     global restyler
     from dataclasses import replace
+    if not claim(dest):
+        return  # finished, or another pod is rendering it
     shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True)
     numeric, images = episode_rows(root, episode)
@@ -784,11 +817,22 @@ def export(args):
         raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
     contract_path.write_text(json.dumps(contract, indent=2) + '\n')
     dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k, _ in items]
+    job = lambda i: (args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
+                     args.masks, args.soft_edges, items[i][2], items[i][4])
     todo = [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]
+    if args.reverse:  # a second pod works from the other end of the list
+        todo = todo[::-1]
     print(f'{len(items) - len(todo)} of {len(items)} episodes ready; rendering {len(todo)} '
           f'({len(restyled) * args.copies} restyled copies)', flush=True)
-    run_jobs(render_job, [(args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
-                           args.masks, args.soft_edges, items[i][2], items[i][4]) for i in todo], args.workers)
+    run_jobs(render_job, [job(i) for i in todo], args.workers)
+    if args.render_only:
+        print('rendering pass finished (--render-only); the main run writes the dataset', flush=True)
+        return
+    # Episodes another pod is still rendering: wait for them (taking over any that go stale).
+    while missing := [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]:
+        print(f'waiting for {len(missing)} episodes rendered elsewhere', flush=True)
+        time.sleep(60)
+        run_jobs(render_job, [job(i) for i in missing], args.workers)
     provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py export',
                       method='table/background restyle; robot, parts and hands copied back from the real frames',
                       depth_model=DEPTH_MODEL, masks=args.masks, soft_edges=args.soft_edges,
@@ -960,6 +1004,10 @@ def main():
     p.add_argument('--no-originals', dest='include_originals', action='store_false')
     p.add_argument('--relight', action='store_true',
                    help='also apply the lighting change here (default: leave it to the `relight` pass)')
+    p.add_argument('--reverse', action='store_true',
+                   help='render from the end of the list (a second pod sharing the same --work folder)')
+    p.add_argument('--render-only', action='store_true',
+                   help='stop after rendering; the main run (without this flag) writes the dataset')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--limit', type=int)
     p.add_argument('--keep-jpegs', action='store_true')
