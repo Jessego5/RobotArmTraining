@@ -819,6 +819,15 @@ def export(args):
     dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k, _ in items]
     job = lambda i: (args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
                      args.masks, args.soft_edges, items[i][2], items[i][4])
+    if args.write_finished:  # write what is rendered so far and stop (other pods may keep rendering)
+        finished = [d for d in dests if (d / 'done.json').exists()]
+        print(f'writing the {len(finished)} finished of {len(dests)} episodes', flush=True)
+        provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py export',
+                          partial=f'{len(finished)} of {len(dests)} episodes', work=str(args.work),
+                          restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'})
+        total = write_dataset(args.root, args.output, finished, provenance, keep_jpegs=True)
+        print(f'complete: {len(finished)} episodes, {total} frames at {args.output}')
+        return
     todo = [i for i, d in enumerate(dests) if not (d / 'done.json').exists()]
     if args.reverse:  # a second pod works from the other end of the list
         todo = todo[::-1]
@@ -1008,6 +1017,9 @@ def main():
                    help='render from the end of the list (a second pod sharing the same --work folder)')
     p.add_argument('--render-only', action='store_true',
                    help='stop after rendering; the main run (without this flag) writes the dataset')
+    p.add_argument('--write-finished', action='store_true',
+                   help='only write a dataset from the episodes finished so far (keeps their JPEGs, so a '
+                        'running render is not disturbed)')
     p.add_argument('--workers', type=int, default=4)
     p.add_argument('--limit', type=int)
     p.add_argument('--keep-jpegs', action='store_true')
