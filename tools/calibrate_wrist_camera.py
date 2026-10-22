@@ -3,8 +3,9 @@
 
 At the robot (about 10 minutes per camera):
 
-1. Print a checkerboard, glue it to something flat and stiff, and measure one
-   square after printing. Tape it flat on the table; do not move it again.
+1. Print a checkerboard (`--make-board board.png` writes one at true size: the
+   default 10 x 7 squares of 25 mm fit US Letter or A4 in landscape), glue it to
+   something flat and stiff, and measure a few squares after printing. Tape it flat on the table; do not move it again.
 2. Record one ordinary teleop episode: move the arm through about 20 different
    poses with the board in view of that arm's wrist camera (near and far,
    tilted, the board in different parts of the image including near the edges)
@@ -94,6 +95,23 @@ def board_points(cols, rows, square_m):
     grid = np.zeros((rows * cols, 3))
     grid[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2) * square_m
     return grid
+
+
+def make_board(path: Path, cols, rows, square_mm, dpi=300):
+    """A printable checkerboard at true size: (cols+1) x (rows+1) squares, white border, 50 mm bar."""
+    px = lambda mm: int(round(mm / 25.4 * dpi))
+    sq, border = px(square_mm), px(10)  # 10 mm of white is enough for the detector
+    board = np.full(((rows + 1) * sq + 2 * border + px(12), (cols + 1) * sq + 2 * border), 255, np.uint8)
+    for r in range(rows + 1):
+        for c in range(cols + 1):
+            if (r + c) % 2 == 0:
+                board[border + r * sq:border + (r + 1) * sq, border + c * sq:border + (c + 1) * sq] = 0
+    y = border + (rows + 1) * sq + px(6)
+    cv2.line(board, (border, y), (border + px(50), y), 0, px(.6))
+    cv2.putText(board, f'50 mm  |  {cols + 1} x {rows + 1} squares of {square_mm:g} mm ({cols} x {rows} inner corners)',
+                (border + px(54), y + px(1.2)), cv2.FONT_HERSHEY_SIMPLEX, px(3) / 22, 0, max(1, px(.3)))
+    cv2.imwrite(str(path), board)
+    return path, (board.shape[1] / dpi * 25.4, board.shape[0] / dpi * 25.4)
 
 
 # ---------------------------------------------------------------- kinematics
@@ -243,10 +261,16 @@ def main():
     parser.add_argument('--max-views', type=int, default=40)
     parser.add_argument('--min-pose-change', type=float, default=.08, help='rad between chosen views')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/wrist_calibration.json')
+    parser.add_argument('--make-board', type=Path, help='write a printable checkerboard (PNG, 300 dpi) and stop')
     parser.add_argument('--selftest', action='store_true')
     args = parser.parse_args()
     if args.selftest:
         sys.exit(0 if selftest() else 1)
+    if args.make_board:
+        path, (w, h) = make_board(args.make_board, args.cols, args.rows, args.square_mm)
+        print(f'wrote {path}: {w:.0f} x {h:.0f} mm; print at 100%, check the 50 mm bar, measure a few squares '
+              'and pass the measured size as --square-mm')
+        return
     if not args.dataset and not args.captures:
         parser.error('give --dataset or --captures')
     images, joints = from_captures(args.captures, args.camera) if args.captures else \
