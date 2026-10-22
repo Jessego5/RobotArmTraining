@@ -521,33 +521,102 @@ def write_folder(root, dest, numeric, frames_or_jpegs, report):
 CLAIM_STALE_S = 2 * 3600  # a claim older than this (a crashed or stopped pod) can be taken over
 
 
-def claim(dest):
-    """May this process render `dest`? Not if it is finished, or another pod is rendering it.
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by someone else
+        return True
+    return True
 
-    Several pods can share one --work folder on the network volume: each episode is claimed
-    with an exclusive marker file before rendering. Claims from this same machine (an earlier,
-    stopped run) and stale claims are taken over.
+
+def claim(dest):
+    """May this process render `dest`? Not if it is finished, or another process is rendering it.
+
+    Several processes, on one machine or several sharing a network volume, can use one --work
+    folder: each episode is claimed with an exclusive marker file holding `host:pid` before
+    rendering. A claim is taken over only when abandoned: on this machine, when its process is
+    no longer running; from another machine, when older than CLAIM_STALE_S. Taking over is
+    atomic: the stale marker is renamed aside, which only one process can do, before a new one
+    is created exclusively.
     """
     import socket
     if (dest / 'done.json').exists():
         return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     mark = dest.parent / (dest.name + '.claim')
-    me = f'{socket.gethostname()}:{os.getpid()}'
-    try:
-        fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, me.encode())
+    host, pid = socket.gethostname(), os.getpid()
+
+    def create():
+        try:
+            fd = os.open(mark, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+        os.write(fd, f'{host}:{pid}'.encode())
         os.close(fd)
         return True
-    except FileExistsError:
-        try:
-            owner, age = mark.read_text().split(':')[0], time.time() - mark.stat().st_mtime
-        except OSError:
-            return False
-        if owner == socket.gethostname() or age > CLAIM_STALE_S:
-            mark.write_text(me)
-            return True
+
+    if create():
+        return True
+    try:
+        seen = mark.read_text()
+        owner_host, owner_pid = seen.rsplit(':', 1)
+        owner_pid, age = int(owner_pid), time.time() - mark.stat().st_mtime
+    except (OSError, ValueError):
         return False
+    if owner_host == host and owner_pid == pid:
+        return True  # already ours
+    abandoned = (owner_host == host and not _alive(owner_pid)) or (owner_host != host and age > CLAIM_STALE_S)
+    if not abandoned:
+        return False
+    aside = mark.with_name(f'{mark.name}.stale-{host}-{pid}')
+    try:
+        os.rename(mark, aside)
+    except FileNotFoundError:
+        return False  # another process took it over first
+    if aside.read_text() != seen:  # it was replaced by a fresh claim in between: put it back
+        os.rename(aside, mark)
+        return False
+    aside.unlink()
+    return create()
+
+
+def episode_ready(dest):
+    """Finished, and still holding all its JPEGs (writing a dataset without --keep-jpegs removes them)."""
+    try:
+        frames = json.loads((dest / 'done.json').read_text())['frames']
+    except (OSError, ValueError, KeyError):
+        return False
+    return all(len(list((dest / camera).glob('*.jpg'))) == frames for camera in CAMERAS)
+
+
+def reopen_stripped(dests):
+    """Finished folders whose JPEGs an earlier dataset write removed: mark them for rendering again."""
+    stripped = [d for d in dests if (d / 'done.json').exists() and not episode_ready(d)]
+    for d in stripped:
+        (d / 'done.json').unlink()
+        (d.parent / (d.name + '.claim')).unlink(missing_ok=True)
+    return stripped
+
+
+def check_settings(work, contract):
+    """Record a run's settings in its --work folder, refusing a folder made with other settings
+    (its finished episodes would otherwise be reused as if they matched)."""
+    path = work / 'settings.json'
+    if path.exists() and json.loads(path.read_text()) != json.loads(json.dumps(contract, default=str)):
+        raise SystemExit(f'{work} was made with other settings or another source; use a fresh --work folder')
+    work.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(contract, indent=2, default=str) + '\n')
+
+
+def output_matches(output, dests):
+    """Is `output` already the complete dataset of exactly these episode folders?"""
+    try:
+        names = list(json.loads((output / 'meta/provenance.json').read_text())['episodes'])
+    except (OSError, ValueError, KeyError):
+        return False
+    return (output / 'COMPLETE').exists() and names == [d.name for d in dests]
 
 
 def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, args_scramble=True,
@@ -599,10 +668,20 @@ def render_job(root, dest, episode, restyle_seed, settings, args_relight=False, 
 
 
 def write_dataset(info_root, output, dests, provenance, keep_jpegs=False):
-    """Collect finished episode folders into one LeRobot dataset in the real dataset's format."""
+    """Collect finished episode folders into one LeRobot dataset in the real dataset's format.
+
+    Every folder must be finished and still hold its JPEGs, or nothing is written. The dataset
+    is built beside `output` and replaces it only once complete, so a failure leaves any
+    earlier output intact.
+    """
     import pickle
+    missing = [d.name for d in dests if not episode_ready(d)]
+    if missing:
+        raise SystemExit(f'{len(missing)} episode folders are unfinished or lost their images ({missing[:3]}...); '
+                         f'nothing was written and {output} is unchanged')
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
     info = json.loads((info_root / 'meta/info.json').read_text())
+    final, output = output, output.with_name(output.name + '.writing')
     shutil.rmtree(output, ignore_errors=True)
     task = __import__('pyarrow.parquet', fromlist=['x']).read_table(
         info_root / 'meta/tasks.parquet').to_pandas().index.tolist()[0]
@@ -630,6 +709,8 @@ def write_dataset(info_root, output, dests, provenance, keep_jpegs=False):
     (output / 'meta/provenance.json').write_text(json.dumps(dict(provenance, episodes=reports), indent=2,
                                                             default=str) + '\n')
     (output / 'COMPLETE').write_text(f'{len(dests)} episodes, {total} frames\n')
+    shutil.rmtree(final, ignore_errors=True)
+    output.rename(final)
     if not keep_jpegs:
         for dest in dests:
             for camera in CAMERAS:
@@ -663,20 +744,22 @@ def export(args):
     items += [(e, args.seed * 100003 + e + 1000003 * k, (k % 2 == 0) if args.balanced else None, k, clean(e, k))
               for k in range(args.copies) for e in restyled]
     settings = restyle_settings(args)
-    args.work.mkdir(parents=True, exist_ok=True)
     contract = dict(source=REAL, revision=revision, items=items,
                     restyle={k: v for k, v in asdict(settings).items() if k != 'prompts'}, relight=args.relight,
                     scramble=args.scramble, masks='depth', soft_edges=args.soft_edges,
                     wood_cleanup=args.wood_cleanup, palettes=[REALISTIC_PALETTES, WILD_PALETTES])
-    contract_path = args.work / 'settings.json'
-    if contract_path.exists() and json.loads(contract_path.read_text()) != json.loads(json.dumps(contract)):
-        raise SystemExit(f'{args.work} was rendered with other settings; use a fresh --work path')
-    contract_path.write_text(json.dumps(contract, indent=2) + '\n')
+    check_settings(args.work, contract)
     dests = [args.work / (f'episode_{e:04d}' + ('' if s is None else f'_restyled{k}')) for e, s, _, k, _ in items]
+    if not args.write_finished and not args.render_only and output_matches(args.output, dests):
+        print(f'{args.output} is already the complete dataset of these {len(dests)} episodes; nothing to do')
+        return
+    if stripped := reopen_stripped(dests):
+        print(f'{len(stripped)} finished episodes lost their images to an earlier dataset write; rendering them again',
+              flush=True)
     job = lambda i: (args.root, dests[i], items[i][0], items[i][1], settings, args.relight, args.scramble,
                      args.soft_edges, items[i][2], items[i][4])
     if args.write_finished:  # write what is rendered so far and stop (other pods may keep rendering)
-        finished = [d for d in dests if (d / 'done.json').exists()]
+        finished = [d for d in dests if episode_ready(d)]
         print(f'writing the {len(finished)} finished of {len(dests)} episodes', flush=True)
         provenance = dict(source=REAL, revision=revision, generator='tools/augment_real_dataset.py export',
                           partial=f'{len(finished)} of {len(dests)} episodes', work=str(args.work),
@@ -753,9 +836,20 @@ def relight_dataset(args):
     missing = sum(1 for i, s in items if s is not None and not (maps_for(i) and Path(maps_for(i)).exists()))
     print(f'{len(items)} output episodes ({len(items) - len(chosen) * args.variants} as is, '
           f'{len(chosen) * args.variants} relit; {missing} need depth and masks computed)', flush=True)
-    args.work.mkdir(parents=True, exist_ok=True)
+    complete = args.source / 'COMPLETE'
+    check_settings(args.work, dict(source=str(args.source.resolve()), source_episodes=count,
+                                   source_frames=info['total_frames'],
+                                   source_complete=complete.read_text() if complete.exists() else None,
+                                   maps=str(work), seed=args.seed, variants=args.variants, fraction=args.fraction,
+                                   include_source=args.include_source))
     dests = [args.work / (f'episode_{i:04d}' + ('' if s is None else f'_lit{(s - args.seed * 100003 - i) // 1000003}'))
              for i, s in items]
+    if output_matches(args.output, dests):
+        print(f'{args.output} is already the complete dataset of these {len(dests)} episodes; nothing to do')
+        return
+    if stripped := reopen_stripped(dests):
+        print(f'{len(stripped)} finished episodes lost their images to an earlier dataset write; rendering them again',
+              flush=True)
     todo = [k for k, d in enumerate(dests) if not (d / 'done.json').exists()]
     run_jobs(relight_job, [(args.source, items[k][0], maps_for(items[k][0]), dests[k], items[k][1])
                            for k in todo], args.workers)
