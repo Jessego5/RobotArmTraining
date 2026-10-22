@@ -1,6 +1,9 @@
 """Checks of tools/augment_real_dataset.py that need no models, GPU or network."""
+import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -100,6 +103,81 @@ class ClaimTest(unittest.TestCase):
             os.utime(work / (stale.name + '.claim'), (old, old))
             with as_pod('pod-b'):
                 self.assertTrue(aug.claim(stale))  # abandoned claims are taken over
+
+    def test_a_live_process_on_the_same_host_keeps_its_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            episode = Path(tmp) / 'episode_0001_restyled0'
+            mark = Path(tmp) / (episode.name + '.claim')
+            mark.write_text(f'{socket.gethostname()}:{os.getppid()}')  # our parent process: alive
+            self.assertFalse(aug.claim(episode))
+            dead = subprocess.Popen([sys.executable, '-c', 'pass'])
+            dead.wait()
+            mark.write_text(f'{socket.gethostname()}:{dead.pid}')  # a finished process: abandoned
+            self.assertTrue(aug.claim(episode))
+            self.assertEqual(mark.read_text(), f'{socket.gethostname()}:{os.getpid()}')
+
+
+class RerunTest(unittest.TestCase):
+    def test_settings_record_refuses_other_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            aug.check_settings(Path(tmp), dict(seed=1, source='a'))
+            aug.check_settings(Path(tmp), dict(seed=1, source='a'))  # the same run again is fine
+            with self.assertRaises(SystemExit):
+                aug.check_settings(Path(tmp), dict(seed=99, source='a'))
+
+    def test_stripped_folders_are_rendered_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / 'episode_0000_lit0'
+            for camera in aug.CAMERAS:
+                (dest / camera).mkdir(parents=True)
+                (dest / camera / '00000.jpg').write_bytes(b'x')
+            (dest / 'done.json').write_text(json.dumps(dict(frames=1)))
+            self.assertTrue(aug.episode_ready(dest))
+            self.assertEqual(aug.reopen_stripped([dest]), [])
+            for camera in aug.CAMERAS:  # what a dataset write without --keep-jpegs leaves behind
+                (dest / camera / '00000.jpg').unlink()
+            self.assertFalse(aug.episode_ready(dest))
+            self.assertEqual(aug.reopen_stripped([dest]), [dest])
+            self.assertFalse((dest / 'done.json').exists())
+
+
+def synthetic_source(root, size=16):
+    """A minimal dataset description in the real format: meta/info.json and meta/tasks.parquet."""
+    import pandas as pd
+    vector = dict(dtype='float32', shape=[14], names=None)
+    features = {k: dict(vector) for k in aug.NUMERIC}
+    features.update({f'observation.images.{c}': dict(dtype='image', shape=[size, size, 3],
+                                                      names=['height', 'width', 'channels']) for c in aug.CAMERAS})
+    (root / 'meta').mkdir(parents=True)
+    (root / 'meta/info.json').write_text(json.dumps(dict(fps=20, robot_type='test', features=features)))
+    pd.DataFrame({'task_index': [0]}, index=['put the gear in the carrier']).to_parquet(root / 'meta/tasks.parquet')
+
+
+def synthetic_episode(root, dest, frames=3, size=16):
+    rng = np.random.default_rng(len(dest.name))
+    numeric = {k: rng.random((frames, 14)).astype(np.float32) for k in aug.NUMERIC}
+    images = {c: rng.integers(0, 255, (frames, size, size, 3), dtype=np.uint8) for c in aug.CAMERAS}
+    dest.mkdir(parents=True)
+    aug.write_folder(root, dest, numeric, images, dict(frames=frames))
+
+
+@unittest.skipUnless(__import__('importlib').util.find_spec('lerobot'), 'needs lerobot')
+class WriteDatasetTest(unittest.TestCase):
+    def test_rerun_after_cleanup_keeps_the_finished_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            synthetic_source(tmp / 'source')
+            dests = [tmp / 'work' / f'episode_000{i}' for i in range(2)]
+            for dest in dests:
+                synthetic_episode(tmp / 'source', dest)
+            output = tmp / 'out'
+            aug.write_dataset(tmp / 'source', output, dests, dict(test=True))  # removes the JPEGs
+            self.assertTrue((output / 'COMPLETE').exists())
+            self.assertTrue(aug.output_matches(output, dests))
+            with self.assertRaises(SystemExit):  # the folders lost their images: refuse, change nothing
+                aug.write_dataset(tmp / 'source', output, dests, dict(test=True))
+            self.assertTrue((output / 'COMPLETE').exists())
+            self.assertTrue((output / 'meta/provenance.json').exists())
 
 
 if __name__ == '__main__':
