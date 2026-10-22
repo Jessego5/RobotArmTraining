@@ -5,6 +5,8 @@
   corners, the calibration scripts' default), for the wrist cameras and the overhead lens.
 - tag_sheet_tabloid.pdf: US Tabloid (11 x 17 in), landscape. Six tag36h11 tags of 90 mm
   with 25 mm gaps and the numbered touch corners, for the overhead camera's pose.
+- tag_sheet_letter.pdf: the same on US Letter, portrait, for a normal printer: four tags
+  of 80 mm with 20 mm gaps (pass --grid 2 2 --tag-mm 80 --gap-mm 20).
 
 Print at "Actual size" / 100%, never "Fit". Each page has a card-check bar 85.60 mm
 long, the ISO ID-1 width of bank and ID cards: if a card's long edge spans it exactly,
@@ -79,12 +81,13 @@ def checkerboard(path, inner=(9, 6), square_mm=20.):
     return save_pdf(page, path)
 
 
-def tag_sheet(path, tag_mm=90., gap_mm=25.):
-    """Tabloid landscape: the six-tag grid of calibrate_overhead_camera.py at true size."""
-    sheet = Sheet(tag_mm / 1000, gap_mm / 1000)
+def tag_sheet(path, tag_mm=90., gap_mm=25., grid=(3, 2), paper_mm=TABLOID_MM, paper='11 x 17 in'):
+    """The tag grid of calibrate_overhead_camera.py at true size: 3 x 2 on Tabloid landscape,
+    or 2 x 2 on US Letter portrait."""
+    sheet = Sheet(tag_mm / 1000, gap_mm / 1000, grid)
     width_mm, height_mm = sheet.extent() * 1000
     image, _ = sheet.render(int(round(px(width_mm) * 20 / 18)))  # render() keeps a 1/20 margin per side
-    page = np.full((px(TABLOID_MM[1]), px(TABLOID_MM[0])), 255, np.uint8)
+    page = np.full((px(paper_mm[1]), px(paper_mm[0])), 255, np.uint8)
     top = px(8)
     left = (page.shape[1] - image.shape[1]) // 2
     page[top:top + image.shape[0], left:left + image.shape[1]] = image[..., 0] if image.ndim == 3 else image
@@ -96,9 +99,15 @@ def tag_sheet(path, tag_mm=90., gap_mm=25.):
                     px(9) / 22, 0, px(1.2))
     y = top + image.shape[0] + px(6)
     x0 = int(left + sheet.corner_pixels[0][0] * scale)
-    text(page, f'tag36h11 ids 0-5  |  tags {tag_mm:g} mm, gaps {gap_mm:g} mm  |  touch corners 1, 2, 3, 4  |  '
-         'print at Actual size on 11 x 17 in', x0, y + px(4), 3.2)
-    card_bar(page, x0, y + px(14))
+    count = grid[0] * grid[1]
+    wide = paper_mm[0] > 300
+    first = f'tag36h11 ids 0-{count - 1}  |  tags {tag_mm:g} mm, gaps {gap_mm:g} mm  |  touch corners 1, 2, 3, 4'
+    if wide:
+        text(page, f'{first}  |  print at Actual size on {paper}', x0, y + px(4), 3.2)
+    else:
+        text(page, first, x0, y + px(4), 3.2)
+        text(page, f'print at Actual size / 100% on {paper}', x0, y + px(10), 3.2)
+    card_bar(page, x0, y + px(14 if wide else 20), below=not wide)
     return save_pdf(page, path)
 
 
@@ -107,7 +116,8 @@ def main():
     parser.add_argument('--output', type=Path, default=Path('outputs/print'))
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    for path in (checkerboard(args.output / 'checkerboard_letter.pdf'), tag_sheet(args.output / 'tag_sheet_tabloid.pdf')):
+    for path in (checkerboard(args.output / 'checkerboard_letter.pdf'), tag_sheet(args.output / 'tag_sheet_tabloid.pdf'),
+                 tag_sheet(args.output / 'tag_sheet_letter.pdf', 80., 20., (2, 2), LETTER_MM, 'US Letter')):
         print(f'wrote {path}')
 
 

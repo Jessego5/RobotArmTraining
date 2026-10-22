@@ -53,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.calibrate_wrist_camera import Arm, board_points, rigid, still_frames
 
 CROP = (176, 224, 432, 480)  # the dataset's overhead crop of the 640x480 frame (x0, y0, x1, y1)
-GRID = (3, 2)  # tags across, down
+GRID = (3, 2)  # tags across, down (the Tabloid sheet; 2 x 2 fits US Letter)
 DICTIONARY = cv2.aruco.DICT_APRILTAG_36h11
 
 
@@ -83,9 +83,10 @@ def calibrate_lens(images, cols, rows, square_m):
 class Sheet:
     """The printed grid of tags: its board geometry and its four numbered outer corners."""
 
-    def __init__(self, tag_m, gap_m):
+    def __init__(self, tag_m, gap_m, grid=GRID):
         self.dictionary = cv2.aruco.getPredefinedDictionary(DICTIONARY)
-        self.board = cv2.aruco.GridBoard(GRID, tag_m, gap_m, self.dictionary)
+        self.grid = tuple(grid)
+        self.board = cv2.aruco.GridBoard(self.grid, tag_m, gap_m, self.dictionary)
         points = np.concatenate([np.asarray(p, np.float64).reshape(4, 3) for p in self.board.getObjPoints()])
         lo, hi = points.min(0), points.max(0)
         box = np.array([[lo[0], lo[1], 0], [hi[0], lo[1], 0], [hi[0], hi[1], 0], [lo[0], hi[1], 0]])
@@ -121,7 +122,8 @@ class Sheet:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
         corners, ids, _ = cv2.aruco.ArucoDetector(self.dictionary).detectMarkers(gray)
         if ids is None or len(ids) < 2:
-            raise SystemExit(f"found {0 if ids is None else len(ids)} of the sheet's 6 tags; need at least 2")
+            raise SystemExit(f"found {0 if ids is None else len(ids)} of the sheet's {self.grid[0] * self.grid[1]} tags; "
+                             'need at least 2')
         obj, img = self.board.matchImagePoints(corners, ids)
         return obj.reshape(-1, 3).astype(np.float64), img.reshape(-1, 2).astype(np.float64), sorted(ids.ravel().tolist())
 
@@ -221,7 +223,7 @@ def joints_from_dataset(root: Path, episode: int, offset: int):
 
 # ---------------------------------------------------------------- self-test -
 
-def selftest(seed=0):
+def selftest(seed=0, grid=GRID, tag_m=.10, gap_m=.03):
     rng = np.random.default_rng(seed)
     ok = True
     # Lens: synthetic board views through a known webcam lens.
@@ -242,13 +244,13 @@ def selftest(seed=0):
     print(f'lens: rms {rms:.2f} px, focal length within {focal:.2f} px')
     ok &= focal < 4
     # The printed sheet's own image must decode, with all six tags.
-    sheet = Sheet(.10, .03)
+    sheet = Sheet(tag_m, gap_m, grid)
     image, _ = sheet.render(900)
-    ok &= len(sheet.detect(np.pad(image, 40, constant_values=255))[2]) == 6
+    ok &= len(sheet.detect(np.pad(image, 40, constant_values=255))[2]) == grid[0] * grid[1]
     # Sheet face up on the table; a camera above and behind the arms like the solved overhead one.
     yaw = np.radians(25.)
     Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
-    sheet_in_base = rigid(Rz @ sheet.face_up, [.25, -.15, -.0584])
+    sheet_in_base = rigid(Rz @ sheet.face_up, [.3, -.1, -.0584])
     eye, target = np.array([.07, 0., 1.0]), np.array([1.05, -.1, 0.])
     z = (target - eye) / np.linalg.norm(target - eye)
     x = np.cross(z, [0, 0, 1.])
@@ -272,7 +274,9 @@ def selftest(seed=0):
     err_deg = np.degrees(np.arccos(np.clip((np.trace(cam_in_base[:3, :3].T @ cam[:3, :3]) - 1) / 2, -1, 1)))
     print(f'sheet: {len(obj)} corners, reprojection {error:.2f} px; touch fit residual {residual * 1000:.2f} mm; '
           f'camera pose within {err_mm:.1f} mm and {err_deg:.2f} deg')
-    ok &= err_mm < 15 and err_deg < 1.
+    # The 2 x 2 Letter sheet spans half as far as the 3 x 2 Tabloid one, so it is less exact.
+    limit_mm, limit_deg = (15, 1.) if grid[0] * grid[1] >= 6 else (25, 1.5)
+    ok &= err_mm < limit_mm and err_deg < limit_deg
     print('SELFTEST', 'PASSED' if ok else 'FAILED')
     return ok
 
@@ -289,6 +293,8 @@ def main():
     parser.add_argument('--sheet-image', type=Path, help='full-frame overhead image showing the tag sheet')
     parser.add_argument('--tag-mm', type=float, default=100., help="side of one tag's black square, as printed")
     parser.add_argument('--gap-mm', type=float, default=30., help='gap between neighbouring tags, as printed')
+    parser.add_argument('--grid', type=int, nargs=2, default=list(GRID), help='tags across and down: 3 2 for the '
+                        'Tabloid sheet, 2 2 for the Letter sheet')
     parser.add_argument('--touch-dataset', type=Path, help='local LeRobot dataset with the corner-touch episodes')
     parser.add_argument('--left-episode', type=int, help='episode where the left arm touches corners 1-4')
     parser.add_argument('--right-episode', type=int, help='the same with the right arm (gives the right base pose)')
@@ -297,8 +303,9 @@ def main():
     parser.add_argument('--selftest', action='store_true')
     args = parser.parse_args()
     if args.selftest:
-        sys.exit(0 if selftest() else 1)
-    sheet = Sheet(args.tag_mm / 1000, args.gap_mm / 1000)
+        results = [selftest(seed) for seed in range(2)] + [selftest(seed, (2, 2), .08, .02) for seed in range(2)]
+        sys.exit(0 if all(results) else 1)
+    sheet = Sheet(args.tag_mm / 1000, args.gap_mm / 1000, args.grid)
     if args.make_sheet:
         print(f'wrote {make_sheet(args.make_sheet, sheet, args.tag_mm, args.gap_mm)}: print at 100% on A3, check '
               'the 50 mm bar, measure a tag and a gap, pass them as --tag-mm and --gap-mm')
