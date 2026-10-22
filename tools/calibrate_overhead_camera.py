@@ -106,7 +106,7 @@ class Sheet:
     def render(self, width):
         margin = width // 20  # the detector needs white around the outer tags
         w, h = self.extent()
-        size = (width, int(round((width - 2 * margin) * h / w)) + 2 * margin)
+        size = (width, int(np.ceil((width - 2 * margin) * h / w)) + 2 * margin + 2)  # a little slack for rounding
         image = self.board.generateImage(size, marginSize=margin, borderBits=1)
         corners, ids, _ = cv2.aruco.ArucoDetector(self.dictionary).detectMarkers(image)
         obj, img = self.board.matchImagePoints(corners, ids)
