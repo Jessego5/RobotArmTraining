@@ -208,6 +208,19 @@ def solve(views, objp, image_size, arm: Arm):
     return calibration, report, errors
 
 
+def estimate_square(views, cols, rows, image_size, arm, lo_mm=10., hi_mm=40.):
+    """The printed square size, without a ruler. The camera alone cannot tell a small board
+    near from a big one far, but the arm's joint angles measure real distances: only the true
+    size makes every view agree on where the board is, so it is the size with the smallest
+    error through the whole chain (joints -> mount -> lens -> corners)."""
+    cost = lambda mm: solve(views, board_points(cols, rows, mm / 1000), image_size, arm)[1]['chain_rms_px_median']
+    grid = np.arange(lo_mm, hi_mm + 1e-9, 1.)
+    best = grid[int(np.argmin([cost(mm) for mm in grid]))]
+    fine = np.arange(best - 1, best + 1 + 1e-9, .1)
+    errors = [cost(mm) for mm in fine]
+    return float(fine[int(np.argmin(errors))]), float(min(errors))
+
+
 # ---------------------------------------------------------------- self-test -
 
 def selftest(seed=0):
@@ -236,13 +249,15 @@ def selftest(seed=0):
             continue
         views.append((pts + rng.normal(0, .3, pts.shape), q))
     calibration, report, _ = solve(views, objp, size, arm)
+    estimated, _ = estimate_square(views, 9, 6, size, arm)
+    print(f'square size without a ruler: {estimated:.1f} mm (true 25.0)')
     got = np.array(calibration['camera_in_link6'])
     err_mm = np.linalg.norm(got[:3, 3] - mount[:3, 3]) * 1000
     err_deg = rotation_deg(mount[:3, :3].T @ got[:3, :3])
     focal = np.abs(np.array(calibration['K'])[[0, 1], [0, 1]] - K[[0, 1], [0, 1]]).max()
     print(json.dumps(report, indent=1))
     print(f'recovered mount within {err_mm:.2f} mm and {err_deg:.2f} deg; focal length within {focal:.2f} px')
-    ok = err_mm < 1.5 and err_deg < .5 and focal < 2
+    ok = err_mm < 1.5 and err_deg < .5 and focal < 2 and abs(estimated - 25) < .5
     print('SELFTEST', 'PASSED' if ok else 'FAILED')
     return ok
 
@@ -257,7 +272,8 @@ def main():
     parser.add_argument('--camera', choices=sorted(CAMERA_SIDE), default='wrist_port2')
     parser.add_argument('--cols', type=int, default=9, help='inner corners along the board')
     parser.add_argument('--rows', type=int, default=6, help='inner corners across the board')
-    parser.add_argument('--square-mm', type=float, default=25.)
+    parser.add_argument('--square-mm', default='25', help="the printed square size in mm, or 'auto' to work it out "
+                                                           'from the arm\'s motion (no ruler needed)')
     parser.add_argument('--max-views', type=int, default=40)
     parser.add_argument('--min-pose-change', type=float, default=.08, help='rad between chosen views')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/wrist_calibration.json')
@@ -267,7 +283,7 @@ def main():
     if args.selftest:
         sys.exit(0 if selftest() else 1)
     if args.make_board:
-        path, (w, h) = make_board(args.make_board, args.cols, args.rows, args.square_mm)
+        path, (w, h) = make_board(args.make_board, args.cols, args.rows, float(args.square_mm))
         print(f'wrote {path}: {w:.0f} x {h:.0f} mm; print at 100%, check the 50 mm bar, measure a few squares '
               'and pass the measured size as --square-mm')
         return
@@ -277,7 +293,8 @@ def main():
         from_dataset(args.dataset, args.episode, args.camera)
     candidates = still_frames(joints) if not args.captures else list(range(len(images)))
     print(f'{len(images)} frames, {len(candidates)} with the arm still')
-    objp = board_points(args.cols, args.rows, args.square_mm / 1000)
+    auto = str(args.square_mm).lower() == 'auto'
+    objp = board_points(args.cols, args.rows, (25. if auto else float(args.square_mm)) / 1000)
     views, size, chosen = [], None, []
     for i in candidates:
         if chosen and min(np.abs(joints[i] - joints[j]).max() for j in chosen) < args.min_pose_change:
@@ -292,8 +309,16 @@ def main():
     print(f'{len(views)} distinct still views with the whole board found (frames {chosen})')
     if len(views) < 8:
         raise SystemExit('need at least 8 (aim for 15-20): more poses, held still, with the whole board in view')
-    calibration, report, errors = solve(views, objp, size, Arm())
-    calibration.update(camera=args.camera, board=dict(cols=args.cols, rows=args.rows, square_mm=args.square_mm),
+    arm = Arm()
+    if auto:
+        square_mm, error = estimate_square(views, args.cols, args.rows, size, arm)
+        print(f'square size from the arm\'s motion: {square_mm:.1f} mm (chain error {error:.2f} px)')
+        objp = board_points(args.cols, args.rows, square_mm / 1000)
+    else:
+        square_mm = float(args.square_mm)
+    calibration, report, errors = solve(views, objp, size, arm)
+    calibration.update(camera=args.camera, board=dict(cols=args.cols, rows=args.rows, square_mm=square_mm,
+                                                      square_size='estimated from the arm motion' if auto else 'given'),
                        frames=chosen, report=report)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(calibration, indent=2) + '\n')
