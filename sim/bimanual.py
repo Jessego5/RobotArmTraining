@@ -63,6 +63,14 @@ LIGHTS = {
     'ceiling_over': dict(pos=np.array([.20, .10, 1.9]), diffuse=(.25, .25, .24), specular=(.1, .1, .1)),
 }
 OVERHEAD_CROP = (176, 224, 432, 480)
+# How each batch of real recordings was cut down to 256x256 and which wrist camera
+# sits on which arm. From October 30 the overhead keeps a 400x400 square resized to
+# 256, both wrists use [80, 0, 560, 480], and the USB ports swapped arms (the
+# recordings' alignment_assist.camera_mapping: left_wrist wrist_port3).
+REAL_SETUPS = {
+    'oct05': dict(overhead_crop=OVERHEAD_CROP, wrists={'wrist_port2': 'left', 'wrist_port3': 'right'}),
+    'oct30': dict(overhead_crop=(120, 80, 520, 480), wrists={'wrist_port2': 'right', 'wrist_port3': 'left'}),
+}
 # Parts (m). Clearances are generous until real tolerances are known.
 CARRIER_HALF = .022, .016       # square half-width, half-height
 HOLE_HALF = .0045               # square pin hole through carrier and gear

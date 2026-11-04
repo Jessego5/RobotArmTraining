@@ -1,0 +1,65 @@
+{
+ "_about": "Real cameras fitted to the Oct 30-31 demonstrations (ZebTaylor/panthera-gear-carrier-pin-real-20hz, 317 episodes; 12 fitted, 6 held out) with the CAD arms of sim/bimanual_cad.py posed from recorded joint angles. No checkerboard calibration yet: all three are arm-outline searches (tools/fit_cameras.py --setup oct30, the overhead started from the Oct 5 clicked webcam, then a 400-draw coarse search). Crops and which wrist camera is on which arm: sim/bimanual.py REAL_SETUPS['oct30'].",
+ "setup": "oct30",
+ "overhead": {
+  "params": {
+   "px": 0.004744679604672448,
+   "py": 0.02415438144049304,
+   "pz": 0.5229614099732909,
+   "tx": 0.5569853217195899,
+   "ty": -0.18033262567203182,
+   "roll": -0.5707811840789734,
+   "fovy": 52.426789033533545,
+   "cx": 18.647272070599904,
+   "cy": 9.787335277314954,
+   "k1": 0.4310008653612525,
+   "base_dx": 0.006643651431518976,
+   "base_dy": -0.03837053305743227,
+   "base_dyaw": 3.3749624218774597
+  },
+  "method": "outline search started from the Oct 5 clicked webcam (sim/real_cameras.json)",
+  "held_out": {
+   "iou": 0.5695700926886182,
+   "precision": 0.9719325392198382,
+   "outline_px": 6.7503645684984
+  }
+ },
+ "wrist_port2": {
+  "params": {
+   "dx": 0.019419257066323185,
+   "dy": 0.004492741059547114,
+   "dz": 0.014465004237829152,
+   "rx": -5.089034367173143,
+   "ry": -1.898009546726814,
+   "rz": -0.57999786123604,
+   "f": 156.46717615766244,
+   "cx": 125.66892928860347,
+   "cy": 152.02401398922433
+  },
+  "method": "outline search",
+  "held_out": {
+   "iou": 0.5686435490856352,
+   "precision": 0.8183818579139979,
+   "outline_px": 6.543586942884657
+  }
+ },
+ "wrist_port3": {
+  "params": {
+   "dx": 0.0021787155171221133,
+   "dy": 0.011653091289939242,
+   "dz": 0.028851916898210376,
+   "rx": -4.775922817853347,
+   "ry": 5.472471371906194,
+   "rz": 2.5759627943650107,
+   "f": 137.66398632287232,
+   "cx": 128.20235859079335,
+   "cy": 128.45911858308767
+  },
+  "method": "outline search",
+  "held_out": {
+   "iou": 0.5803213011591835,
+   "precision": 0.8615275128591979,
+   "outline_px": 6.793386697769165
+  }
+ }
+}
