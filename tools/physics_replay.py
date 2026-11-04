@@ -26,10 +26,15 @@ Per demonstration:
   back; gripping by finger friction is not simulated;
 - each recorded action (the next joint angles and gripper openings, 20 Hz) is
   sent to the position actuators and the physics runs for 50 ms;
-- at the end the gear and pin are compared with their assembled poses relative
-  to the carrier (the sim's assembly layout), with the sim's tolerances.
+- each held part lets go where its real gripper opened (from October 30 the
+  right arm also sets the finished carrier down);
+- the gear and pin are compared with their assembled poses relative to the
+  carrier (the sim's assembly layout), with the sim's tolerances: as each is
+  released, and finally as the carrier is released (or at the end).
 
     python tools/physics_replay.py --episodes 12 60 95 --output outputs/physics_replay.json
+    python tools/physics_replay.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
+        --grasps outputs/grasp_fit_oct30.json --episodes 5 71 160 --output outputs/physics_replay_oct30.json
 """
 from __future__ import annotations
 
@@ -141,6 +146,12 @@ class PhysicsReplay:
         self.data.qpos[a:a + 3], self.data.qpos[a + 3:a + 7] = pose[:3, 3], quat(pose[:3, :3])
         self.data.qvel[v:v + 6] = 0
 
+    def slot_error(self, name, targets, carrier=None):
+        """A part's offset from its assembled place in the carrier (now, or in a given carrier pose)."""
+        m, d = self.model, self.data
+        carrier = pose_of(m, d, self.body['large_carrier']) if carrier is None else carrier
+        return _slot_error(carrier, pose_of(m, d, self.body[name]), targets[name])
+
     def run(self, states, actions, grips, targets, record=None):
         """record: a list that receives qpos after every frame (for rendering)."""
         m, d = self.model, self.data
@@ -152,7 +163,7 @@ class PhysicsReplay:
             g = next((s for s in segments[side] if s['phase'] == phase), None)
             if g is None:
                 return dict(skipped=f'no {phase} phase')
-            holds[name] = (side, g['start'], g['stop'] if name != 'large_carrier' else len(actions) + 1)
+            holds[name] = (side, g['start'], g['stop'])
         # Rest poses: flat on the table under the grasp point, with the grip's heading.
         for name, (side, start, _) in holds.items():
             self.set_arms(states[start])
@@ -165,7 +176,7 @@ class PhysicsReplay:
         mujoco.mj_forward(m, d)
         for _ in range(200):  # let the parts settle before the arms move
             mujoco.mj_step(m, d)
-        events = []
+        events, at_release, carrier = [], {}, None
         for i, action in enumerate(actions):
             self.set_arms(action, ctrl_only=True)
             for _ in range(self.steps):
@@ -176,24 +187,32 @@ class PhysicsReplay:
                         d.mocap_pos[self.mocap[name]] = target[:3, 3]
                         d.mocap_quat[self.mocap[name]] = quat(target[:3, :3])
                     if bool(d.eq_active[self.weld[name]]) != on:
+                        if not on and name == 'large_carrier':
+                            carrier = pose_of(m, d, self.body[name])  # scored as the hand lets go
+                        elif not on:
+                            at_release[name] = self.slot_error(name, targets)
                         d.eq_active[self.weld[name]] = on
                         events.append(f"{i / FPS:.1f}s {'grab' if on else 'release'} {name}")
                 mujoco.mj_step(m, d)
             if record is not None:
                 record.append(d.qpos.copy())
-        carrier = pose_of(m, d, self.body['large_carrier'])
-        result = dict(events=events)
+        if carrier is None:  # still held at the end
+            carrier = pose_of(m, d, self.body['large_carrier'])
+        result = dict(events=events, at_release=at_release)
         for name in ('gear_3', 'pin_2'):
-            rel = np.linalg.inv(carrier) @ pose_of(m, d, self.body[name])
-            err = rel[:3, 3] - targets[name]
-            tilt = float(np.degrees(np.arccos(np.clip(rel[2, 2], -1, 1))))
-            result[name] = dict(lateral_mm=float(np.linalg.norm(err[:2]) * 1000), axial_mm=float(err[2] * 1000),
-                                tilt_deg=tilt)
+            result[name] = self.slot_error(name, targets, carrier)
         g, p = result['gear_3'], result['pin_2']
         result['gear_seated'] = bool(g['lateral_mm'] < 1.5 and -3 < g['axial_mm'] < 1 and g['tilt_deg'] < 4)
         result['pin_seated'] = bool(p['lateral_mm'] < 1. and -3 < p['axial_mm'] < 3 and p['tilt_deg'] < 4)
         result['accepted'] = result['gear_seated'] and result['pin_seated']
         return result
+
+
+def _slot_error(carrier, part, target):
+    rel = np.linalg.inv(carrier) @ part
+    err = rel[:3, 3] - target
+    return dict(lateral_mm=float(np.linalg.norm(err[:2]) * 1000), axial_mm=float(err[2] * 1000),
+                tilt_deg=float(np.degrees(np.arccos(np.clip(rel[2, 2], -1, 1)))))
 
 
 def assembled_offsets():
@@ -211,8 +230,10 @@ def main():
     parser.add_argument('--episodes', type=int, nargs='+', default=[12, 60, 95])
     parser.add_argument('--grasps', type=Path, default=ROOT / 'outputs/grasp_fit.json')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/physics_replay.json')
+    parser.add_argument('--cameras', type=Path, default=ROOT / 'sim/real_cameras.json',
+                        help='fitted cameras (their overhead solve places the right base)')
     args = parser.parse_args()
-    replay = PhysicsReplay(ROOT / 'sim/real_cameras.json')
+    replay = PhysicsReplay(args.cameras)
     grips, targets = grasps(args.grasps), assembled_offsets()
     results = {}
     for episode in args.episodes:
@@ -229,10 +250,17 @@ def main():
               f"({g['lateral_mm']:.1f} mm off, {g['axial_mm']:+.1f} mm axial, tilt {g['tilt_deg']:.0f} deg); "
               f"pin {'seated' if r['pin_seated'] else 'not seated'} ({p['lateral_mm']:.1f} mm off, "
               f"{p['axial_mm']:+.1f} mm axial, tilt {p['tilt_deg']:.0f} deg)  [{time.time() - started:.0f} s]", flush=True)
+        for name, e in r['at_release'].items():
+            print(f"  at its release, {name} was {e['lateral_mm']:.1f} mm off its place, {e['axial_mm']:+.1f} mm axial, "
+                  f"tilt {e['tilt_deg']:.0f} deg", flush=True)
     args.output.write_text(json.dumps(results, indent=2) + '\n')
     done = [r for r in results.values() if 'skipped' not in r]
     print(f"{sum(r['accepted'] for r in done)} of {len(done)} replayed demos complete the assembly in the sim; "
           f"gear seated in {sum(r['gear_seated'] for r in done)}, pin in {sum(r['pin_seated'] for r in done)}")
+    for name in ('gear_3', 'pin_2'):
+        errors = [r['at_release'][name]['lateral_mm'] for r in done if name in r['at_release']]
+        if errors:
+            print(f"{name} at release: median {np.median(errors):.1f} mm off its place (of {len(errors)})")
 
 
 if __name__ == '__main__':

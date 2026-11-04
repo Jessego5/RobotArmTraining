@@ -13,6 +13,8 @@ of the wrong size or place. The orientation search starts from all 24 right-angl
 rotations at depths from the fingertips back into the palm.
 
     python tools/fit_grasps.py --parts large_carrier gear_3 pin_2
+    python tools/fit_grasps.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
+        --output outputs/grasp_fit_oct30.json
 """
 from __future__ import annotations
 
@@ -33,13 +35,16 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial.transform import Rotation
 
+from sim.bimanual import REAL_SETUPS
 from tools.fit_cameras import WRIST_RENDER, Scene, targets
-from tools.replay_real_in_sim import GRASP, RealViews, phases, transform
+from tools.replay_real_in_sim import GRASP, RealViews, camera_setup, phases, transform
 
-# part -> (holding arm, wrist camera that sees it, phase)
-HELD = {'large_carrier': ('right', 'wrist_port3', 'carrier_held'),
-        'gear_3': ('left', 'wrist_port2', 'gear_held'),
-        'pin_2': ('left', 'wrist_port2', 'pin_held')}
+# part -> (holding arm, phase); each arm's own wrist camera sees its part
+HELD = {'large_carrier': ('right', 'carrier_held'), 'gear_3': ('left', 'gear_held'), 'pin_2': ('left', 'pin_held')}
+
+
+def wrist_of(setup: str, side: str) -> str:
+    return next(c for c, s in REAL_SETUPS[setup]['wrists'].items() if s == side)
 
 
 def right_angle_rotations():
@@ -122,9 +127,9 @@ def grasp_from(params, base):
     return t @ base
 
 
-def samples(root, episodes, part, per_episode):
+def samples(root, episodes, part, per_episode, camera):
     from tools.augment_real_dataset import decode, episode_rows
-    side, camera, phase = HELD[part]
+    side, phase = HELD[part]
     frames, states = [], []
     for episode in episodes:
         numeric, images = episode_rows(root, episode)
@@ -148,18 +153,22 @@ def main():
     parser.add_argument('--per-episode', type=int, default=2)
     parser.add_argument('--keep', type=int, default=3, help='orientations refined after the coarse pass')
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/grasp_fit.json')
+    parser.add_argument('--cameras', type=Path, default=ROOT / 'sim/real_cameras.json',
+                        help='fitted cameras; sim/real_cameras_oct30.json for the October 30-31 recordings')
     args = parser.parse_args()
     info = json.loads((args.root / 'meta/info.json').read_text())
     order = np.random.default_rng(0).permutation(info['total_episodes'])
     fit_eps, held_eps = sorted(order[:args.episodes].tolist()), sorted(order[args.episodes:args.episodes + 5].tolist())
-    scene = Scene()
-    views = RealViews(scene)
+    setup = camera_setup(args.cameras)
+    scene = Scene(setup)
+    views = RealViews(scene, args.cameras)
     depth = Depth()
     results = json.loads(args.output.read_text()) if args.output.exists() else {}
     for part in args.parts:
-        side, camera, _ = HELD[part]
-        frames, states = samples(args.root, fit_eps, part, args.per_episode)
-        held_frames, held_states = samples(args.root, held_eps, part, args.per_episode)
+        side, _ = HELD[part]
+        camera = wrist_of(setup, side)
+        frames, states = samples(args.root, fit_eps, part, args.per_episode, camera)
+        held_frames, held_states = samples(args.root, held_eps, part, args.per_episode, camera)
         real, held_real = targets(frames, depth), targets(held_frames, depth)
         renderer = GripRenderer(scene, views, part, camera, side)
         target, held_target = part_targets(renderer, states, real), part_targets(renderer, held_states, held_real)
@@ -201,7 +210,7 @@ def main():
                 shown[edge] = colour
                 row.append(shown)
             rows.append(np.concatenate(row, 1))
-        path = args.output.with_name(f'grasp_fit_{part}.jpg')
+        path = args.output.with_name(f'{args.output.stem}_{part}.jpg')
         cv2.imwrite(str(path), cv2.cvtColor(np.concatenate(rows, 0), cv2.COLOR_RGB2BGR))
         print(f'  wrote {path} (real | Zeb grip, magenta | fitted grip, green)', flush=True)
 
