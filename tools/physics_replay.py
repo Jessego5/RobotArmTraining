@@ -94,6 +94,12 @@ def quat(rotation):
 
 
 class PhysicsReplay:
+    # --compliant collision bits. The scene's: 1 arms, 2 part pieces (affinity 3), 4 whole-part
+    # hulls that only the table touches, 8 the table. The left gripper gets a type of its own
+    # and still touches the arms, the parts and the table; a held part gets one that the
+    # carrier and the other part touch but the left gripper does not.
+    LEFT_FINGERS, LEFT_AFFINITY, HELD = 16, 1 | 2 | 8, 32
+
     def __init__(self, cameras: Path, exclude_left=True, compliant=False):
         """exclude_left: the gear and pin never collide with the left gripper (replay); the
         insertion environment instead switches that on at release, to push with the fingertips.
@@ -142,14 +148,24 @@ class PhysicsReplay:
                      for n in PARTS}
         self.steps = round(1 / FPS / m.opt.timestep)
         if compliant:
-            # Collision bits as in tools/insertion_env.py: the left gripper's geoms get type 2, so
-            # a held gear or pin (type 4, affinity 1) passes through the fingers but hits the
-            # carrier; released (type 1, affinity 1|2) the closed fingertips can push it.
-            left = {m.body(b).id for b in ('link6', 'L_finger', 'R_finger')}
-            m.geom_contype[[g for g in range(m.ngeom) if m.geom_bodyid[g] in left and m.geom_contype[g]]] = 2
-            self.part_geoms = {n: [g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body[n]
-                                   and (m.geom_contype[g] or m.geom_conaffinity[g])] for n in ('gear_3', 'pin_2')}
+            # A held gear or pin passes through the left fingers but hits the carrier; released,
+            # the closed fingertips can push it (the bits above).
+            self.set_left_fingers()
+            self.part_geoms = {n: self.pieces(n) for n in ('gear_3', 'pin_2')}
             self.soften_right_fingers()
+
+    def set_left_fingers(self):
+        m = self.model
+        left = {m.body(b).id for b in ('link6', 'L_finger', 'R_finger')}
+        geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] in left and m.geom_contype[g]]
+        m.geom_contype[geoms], m.geom_conaffinity[geoms] = self.LEFT_FINGERS, self.LEFT_AFFINITY
+
+    def pieces(self, name):
+        """A part's collision pieces (type 2, affinity 3), without its `_table_contact` hull: that is
+        the convex hull of the whole part (contype 4, affinity 8, the table only), a solid disc
+        over the gear's bore."""
+        m = self.model
+        return [g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body[name] and m.geom_contype[g] == 2]
 
     def soften_right_fingers(self):
         """The right gripper's fin-ray fingers bend around what they hold: in the real wrist
@@ -159,13 +175,11 @@ class PhysicsReplay:
         right = {m.body(b).id for b in ('right_link6', 'right_L_finger', 'right_R_finger')}
         for g in range(m.ngeom):
             if m.geom_bodyid[g] in right and m.geom_contype[g]:
-                m.geom_contype[g], m.geom_conaffinity[g] = 8, 0
+                m.geom_contype[g], m.geom_conaffinity[g] = 0, 8  # the table is type 8
 
     def set_held(self, name, held):
         """--compliant: a held part passes through the left fingers; a released one does not."""
-        m = self.model
-        m.geom_contype[self.part_geoms[name]] = 4 if held else 1
-        m.geom_conaffinity[self.part_geoms[name]] = 1 if held else 3
+        self.model.geom_contype[self.part_geoms[name]] = self.HELD if held else 2
 
     def set_arms(self, state, ctrl_only=False):
         d = self.data
