@@ -33,6 +33,8 @@ does not matter), whether it is released.
 Reward: minus the slot error, plus 10 when seated (the sim's tolerances).
 
     python tools/insertion_env.py --episodes 20     # scripted baseline success rate
+    python tools/insertion_env.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
+        --grasps outputs/grasp_oct30_shifted.json --demo-ids 5 18 71    # from the October 30-31 demos
 """
 from __future__ import annotations
 
@@ -59,13 +61,17 @@ CARRIER_GRIP = transform([-.0279, -.0054, .0214], [[-.88, .47, -.11], [-.45, -.7
 
 class GearInsertionEnv:
     def __init__(self, root=ROOT / 'outputs/real_gear', episodes=None, noise_mm=4., noise_deg=6., seed=0,
-                 lead_s=2.):
+                 lead_s=2., cameras=ROOT / 'sim/real_cameras.json', grips=None):
+        """grips: a grasp file (tools/physics_replay.py format) for the carrier and gear; by
+        default CARRIER_GRIP and Zeb's gear grip."""
         from tools.augment_real_dataset import episode_rows
-        self.replay = r = PhysicsReplay(ROOT / 'sim/real_cameras.json', exclude_left=False)
+        self.replay = r = PhysicsReplay(Path(cameras), exclude_left=False)
         self.m, self.d = r.model, r.data
         self.rng = np.random.default_rng(seed)
         self.noise_mm, self.noise_deg = noise_mm, noise_deg
-        self.gear_grip = grasps(ROOT / 'none')['gear_3']
+        held = grasps(Path(grips) if grips else ROOT / 'none')
+        self.gear_grip = held['gear_3']
+        self.base_carrier_grip = held['large_carrier'] if grips else CARRIER_GRIP
         self.slot = np.eye(4)
         self.slot[:3, 3] = assembled_offsets()['gear_3']
         info = json.loads((Path(root) / 'meta/info.json').read_text())
@@ -158,7 +164,7 @@ class GearInsertionEnv:
         mujoco.mj_kinematics(m, d)
         noise = transform(self.rng.normal(0, self.noise_mm / 1000 / np.sqrt(3), 3),
                           Rotation.from_rotvec(self.rng.normal(0, np.radians(self.noise_deg) / np.sqrt(3), 3)).as_matrix())
-        self.carrier_grip = CARRIER_GRIP @ noise
+        self.carrier_grip = self.base_carrier_grip @ noise
         for name, side, grip in (('large_carrier', 'right', self.carrier_grip), ('gear_3', 'left', self.gear_grip)):
             target = r.grip(side) @ grip
             r.place(name, target)
@@ -370,8 +376,8 @@ def scripted(env, max_steps=400, standoff_mm=15., half_mm=6., gear_radius_mm=12.
 
 
 def _evaluate(args):
-    seed, demos, count, noise_mm, noise_deg = args
-    env = GearInsertionEnv(episodes=range(demos), noise_mm=noise_mm, noise_deg=noise_deg, seed=seed)
+    seed, demos, count, noise_mm, noise_deg, root, cameras, grips = args
+    env = GearInsertionEnv(root, demos, noise_mm=noise_mm, noise_deg=noise_deg, seed=seed, cameras=cameras, grips=grips)
     out = []
     for _ in range(count):
         env.reset()
@@ -387,12 +393,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--episodes', type=int, default=40)
     parser.add_argument('--demos', type=int, default=60, help='real demonstrations to draw starts from')
+    parser.add_argument('--demo-ids', type=int, nargs='+', help='these demonstrations instead of the first --demos')
+    parser.add_argument('--root', type=Path, default=ROOT / 'outputs/real_gear', help='local copy of the real dataset')
+    parser.add_argument('--cameras', type=Path, default=ROOT / 'sim/real_cameras.json',
+                        help='fitted cameras (their overhead solve places the right base)')
+    parser.add_argument('--grasps', type=Path, help='carrier and gear grips (default: CARRIER_GRIP, Zeb\'s gear grip)')
     parser.add_argument('--noise-mm', type=float, default=4.)
     parser.add_argument('--noise-deg', type=float, default=6.)
     parser.add_argument('--workers', type=int, default=8)
     args = parser.parse_args()
     per = -(-args.episodes // args.workers)
-    jobs = [(seed, args.demos, per, args.noise_mm, args.noise_deg) for seed in range(args.workers)]
+    demos = args.demo_ids or list(range(args.demos))
+    jobs = [(seed, demos, per, args.noise_mm, args.noise_deg, args.root, args.cameras, args.grasps)
+            for seed in range(args.workers)]
     with ProcessPoolExecutor(args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
         results = [r for chunk in pool.map(_evaluate, jobs) for r in chunk]
     for k, (start, seated, final) in enumerate(results):
