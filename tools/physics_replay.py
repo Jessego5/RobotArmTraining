@@ -35,7 +35,7 @@ Per demonstration:
 --compliant stands in for the operator's feel: the real arms were hand-guided and
 the parts eased in by touch, which a replay of recorded joint angles cannot do.
 A held part's weld goes soft once it is near its slot, so contact with the carrier
-steers it; at release the left fingers start touching the part, so the recorded
+steers it; the right gripper's fingers yield (soften_right_fingers); at release the left fingers start touching the part, so the recorded
 push afterwards can drive it home; and a press fit (as in tools/insertion_env.py)
 holds a released part that sits in its slot's mouth and lets it move only inward:
 the gear edgewise through the rim, the pin down through the face.
@@ -44,7 +44,7 @@ the gear edgewise through the rim, the pin down through the face.
     python tools/physics_replay.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
         --grasps outputs/grasp_fit_oct30.json --episodes 5 71 160 --output outputs/physics_replay_oct30.json
     python tools/physics_replay.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
-        --grasps outputs/grasp_oct30_shifted.json --compliant --episodes 5 71 160
+        --grasps sim/real_grips_oct30.json --compliant --episodes 5 71 160
 """
 from __future__ import annotations
 
@@ -149,6 +149,17 @@ class PhysicsReplay:
             m.geom_contype[[g for g in range(m.ngeom) if m.geom_bodyid[g] in left and m.geom_contype[g]]] = 2
             self.part_geoms = {n: [g for g in range(m.ngeom) if m.geom_bodyid[g] == self.body[n]
                                    and (m.geom_contype[g] or m.geom_conaffinity[g])] for n in ('gear_3', 'pin_2')}
+            self.soften_right_fingers()
+
+    def soften_right_fingers(self):
+        """The right gripper's fin-ray fingers bend around what they hold: in the real wrist
+        videos the gear slides into the carrier's rim right beside one. Its rigid sim fingers
+        would block it, so they touch only the table (and the carrier never, as before)."""
+        m = self.model
+        right = {m.body(b).id for b in ('right_link6', 'right_L_finger', 'right_R_finger')}
+        for g in range(m.ngeom):
+            if m.geom_bodyid[g] in right and m.geom_contype[g]:
+                m.geom_contype[g], m.geom_conaffinity[g] = 8, 0
 
     def set_held(self, name, held):
         """--compliant: a held part passes through the left fingers; a released one does not."""

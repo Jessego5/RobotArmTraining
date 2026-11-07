@@ -18,7 +18,8 @@ only inward. The right arm holds the carrier at the
 grip measured from the gear releases of 68 demonstrations, plus random error
 (default 4 mm, 6 degrees, the scatter measured between each demonstration's
 gear and pin releases); the left arm holds the gear (Zeb's top-down grip). Holds
-are soft welds to handles that follow the grippers, so contacts push back.
+are soft welds to handles that follow the grippers, so contacts push back. The right
+gripper's fingers yield (PhysicsReplay.soften_right_fingers): the gear goes in beside one.
 
 The gear seats sideways into a slot in the carrier's rim (as in Zeb's controller),
 not from above.
@@ -34,7 +35,7 @@ Reward: minus the slot error, plus 10 when seated (the sim's tolerances).
 
     python tools/insertion_env.py --episodes 20     # scripted baseline success rate
     python tools/insertion_env.py --root outputs/zeb_real_oct31 --cameras sim/real_cameras_oct30.json \
-        --grasps outputs/grasp_oct30_shifted.json --demo-ids 5 18 71    # from the October 30-31 demos
+        --grasps sim/real_grips_oct30.json --demo-ids 5 18 71    # from the October 30-31 demos
 """
 from __future__ import annotations
 
@@ -98,6 +99,7 @@ class GearInsertionEnv:
         left = {m.body(b).id for b in ('link6', 'L_finger', 'R_finger')}
         self.left_geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] in left and m.geom_contype[g]]
         m.geom_contype[self.left_geoms] = 2
+        r.soften_right_fingers()
         gear = r.body['gear_3']
         self.gear_geoms = [g for g in range(m.ngeom) if m.geom_bodyid[g] == gear and (m.geom_contype[g] or m.geom_conaffinity[g])]
 
@@ -346,10 +348,13 @@ def scripted(env, max_steps=400, standoff_mm=15., half_mm=6., gear_radius_mm=12.
                 goal, close = tip, 1.
                 count += 1
                 if count > 8:
-                    stage = 'approach'
+                    # Aim just outside the gear's rim where it is now. A goal that followed the gear
+                    # would chase it inward past its seat if the fingertips touched it early.
+                    stage, approach_goal, approach_radial = 'approach', pos + (gear_radius_mm + 3) * outward, radial
             elif stage == 'approach':  # fingertips just outside the gear's outer rim
-                goal, close = pos + (gear_radius_mm + 3) * outward, 1.
-                if np.linalg.norm(tip - goal) < 1.:
+                goal, close = approach_goal, 1.
+                touched = radial < approach_radial - .3  # already moving it: this is the push
+                if np.linalg.norm(tip - goal) < 1. or touched:
                     stage, count, last_radial = 'push', 0, radial
                     pushes += 1
             elif stage == 'push':  # push inward until the gear is flush
