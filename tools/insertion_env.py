@@ -167,7 +167,7 @@ class GearInsertionEnv:
     def reset(self):
         r, m, d = self.replay, self.m, self.d
         mujoco.mj_resetDataKeyframe(m, d, 0)
-        d.eq_active[:] = 0
+        d.eq_active[list(r.weld.values())] = 0  # the part holds only: the fingers are coupled by equalities too
         state = self.starts[self.rng.integers(len(self.starts))]
         r.set_arms(state)
         mujoco.mj_kinematics(m, d)
@@ -277,6 +277,7 @@ class GearInsertionEnv:
             if action[6] > 0 and not self.released:
                 self.released, self.released_t = True, self.t
                 d.eq_active[r.weld[self.PART]] = 0
+                self.set_contact(self.PART, held=True)  # a part held by friction too (PinStageEnv)
             # The released part keeps passing through the fingers until they have opened (0.4 s):
             # the rigid sim fingers overlap what they held, and would push it out sideways.
             if self.released and self.t == self.released_t + 8:
@@ -315,13 +316,32 @@ class PinStageEnv(GearInsertionEnv):
     slot until the pin holds it, so a press fit holds it at its seat here; the released pin
     gets the same press fit along the bore (the sim has no stop below it, the real hole's
     friction holds it). Seated: Zeb's limits, the pin within 0.75 mm of its depth, 3 degrees,
-    and its centreline in the bore (0.3 mm, about the clearance)."""
+    and its centreline in the bore (0.3 mm, about the clearance).
+
+    grasp='friction' (default): the fingers hold the pin, squeezing it (the real gripper reads
+    fully closed on it) with nothing else attached: at reset a hold steadies the pin only
+    while the pads close on it. Along recorded pin holds this slips under 2.5 mm and turns
+    under 1 degree. The pin keeps its grip file's axis, with the point 12.7 mm from its tip
+    (where Zeb's grip holds it) just inside the fingertips, between the pads.
+    grasp='weld': the pin is welded to the hand, as before."""
     PART, HOLD_PHASE = 'pin_2', 'pin_held'
     CATCH_MM = 13.  # in the upper plate's hole (the fingertips meet the face 11 mm out)
+    PAD_POINT = np.array([-.003, 0., 0.])  # grip frame: just inside the fingertips, mid-pad
+    GRIP_UP = .0127  # the fingers hold the pin this far from its tip
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, grasp='friction', **kwargs):
         super().__init__(*args, **kwargs)
+        self.grasp = grasp
         self.entry = np.array([0., 0., 1.])
+        if grasp == 'friction':
+            # The pads (grip frame x -45..0 mm, z -10..10 mm) squeeze along y: keep the pin's axis,
+            # in the x-z plane, and put the held point between them.
+            axis = self.part_grip[:3, 2].copy()
+            axis[1] = 0
+            axis /= np.linalg.norm(axis)
+            side = np.array([0., 1., 0.])
+            rot = np.c_[np.cross(side, axis), side, axis]
+            self.part_grip = transform(self.PAD_POINT - self.GRIP_UP * axis, rot)
         # The scene's contacts (solref 0.02) let a 7 g pin sink millimetres into the bore's walls
         # under a fingertip push, so the 0.1 mm clearance would mean nothing and the pin would
         # tilt and wedge. The pin's own contacts are stiff, and win the mix with what they touch.
@@ -343,6 +363,29 @@ class PinStageEnv(GearInsertionEnv):
         self.m.eq_solref[r.weld['gear_3']] = [.02, 1]
         d.eq_active[r.weld['gear_3']] = 1
         self.set_contact('gear_3', held=False)
+
+    def reset(self):
+        obs = super().reset()
+        if self.grasp != 'friction':
+            return obs
+        r, m, d = self.replay, self.m, self.d
+        # The pin keeps its own collision bits, so the pads touch it; the weld set up by the reset
+        # steadies it (as the table it was picked from would) while the fingers close, then goes.
+        self.set_contact('pin_2', held=False)
+        left, right = r.fingers['left']
+        d.qpos[left], d.qpos[right] = .0047, -.0047  # just open around the 8 mm pin
+        ctrl = self.state.copy()
+        ctrl[:6] = self.q
+        r.set_arms(ctrl, ctrl_only=True)
+        for k in range(12):
+            if k == 6:
+                d.eq_active[r.weld['pin_2']] = 0
+            for _ in range(r.steps):
+                self.each_step()
+                target = r.grip('right') @ self.carrier_grip
+                d.mocap_pos[r.mocap['large_carrier']], d.mocap_quat[r.mocap['large_carrier']] = target[:3, 3], quat(target[:3, :3])
+                mujoco.mj_step(m, d)
+        return self.observation()
 
     def each_step(self):
         r, d = self.replay, self.d
@@ -485,7 +528,9 @@ def scripted_pin(env, max_steps=400, clear_mm=24., release_mm=12., length_mm=17.
             if pos[2] <= release_mm + .3:
                 stage, release, count = 'open', 1., 0
             elif count % 10 == 0:
-                if pos[2] > last - .2 and tried < tries:  # stuck on the face
+                if pos[2] > last - .2 and pos[2] < env.CATCH_MM - .5:
+                    stage, release, count = 'open', 1., 0  # the fingertips are on the face; the bore holds it
+                elif pos[2] > last - .2 and tried < tries:  # stuck on the face
                     stage, tried = 'align', tried + 1
                 last = pos[2]
         else:

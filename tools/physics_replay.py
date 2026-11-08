@@ -237,7 +237,7 @@ class PhysicsReplay:
         """record: a list that receives qpos after every frame (for rendering)."""
         m, d = self.model, self.data
         mujoco.mj_resetDataKeyframe(m, d, 0)
-        d.eq_active[:] = 0
+        d.eq_active[list(self.weld.values())] = 0  # the part holds only: the fingers are coupled by equalities too
         m.eq_solref[list(self.weld.values())] = FIRM
         # Which way each part goes in: the gear edgewise through the rim, the pin down the face.
         outward = np.r_[targets['gear_3'][:2], 0.] / np.linalg.norm(targets['gear_3'][:2])

@@ -1,0 +1,98 @@
+{
+  "about": "October 30-31 recordings: joint zero offsets (deg, added to the recorded angles), the right base placement (dx, dy m and yaw deg from the layout, as tools/fit_cameras.py Scene.set_right_base) and the part grips. Fitted so every gear and pin release puts the part in its slot and every press puts the fingertips on the pin head, with the gear held by its rim and the pin 12.7 mm from its tip between the finger pads: median 3.4, 3.7 and 5.9 mm over 18 demos, from 8.5, 8.4 and 12.0. The carrier grip is from the right wrist camera, which confirms the calibrated left fingertip positions (not used in the fit).",
+  "left_joint_offsets_deg": [
+    -0.0005343994907782174,
+    1.866149853329932,
+    0.5875442911782386,
+    -1.8346943915145455,
+    2.2975271742460457,
+    -1.0238439256687462
+  ],
+  "right_joint_offsets_deg": [
+    -0.00017060657395276204,
+    1.6673855318561954,
+    -1.705687119233124,
+    0.7147205729563312,
+    1.3440275958404326,
+    2.1456784962332622
+  ],
+  "right_base": [
+    -0.02767415430157921,
+    -0.011863365897302667,
+    -1.6352014821657082
+  ],
+  "grips": {
+    "large_carrier": {
+      "offset": [
+        -0.018745082148578705,
+        -0.00022776847541960705,
+        0.0025038098889569142
+      ],
+      "rotation": [
+        [
+          -0.6195060587997983,
+          0.31969516827499883,
+          -0.7169429841291155
+        ],
+        [
+          -0.4695252404468499,
+          -0.8828368958087628,
+          0.012044250996869217
+        ],
+        [
+          -0.629093229731229,
+          0.3440843134761711,
+          0.6970277566395497
+        ]
+      ]
+    },
+    "gear_3": {
+      "offset": [
+        0.00454580752474788,
+        0.0,
+        0.011809396191460167
+      ],
+      "rotation": [
+        [
+          0.681619374056943,
+          0.0,
+          -0.7317069282918002
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.7317069282918002,
+          0.0,
+          0.6816193740569427
+        ]
+      ]
+    },
+    "pin_2": {
+      "offset": [
+        0.009854605660140946,
+        0.0,
+        -0.009639739672016156
+      ],
+      "rotation": [
+        [
+          0.5191331832662094,
+          0.0,
+          -0.8546933590662164
+        ],
+        [
+          0.0,
+          0.9999999999999999,
+          2.220446049250313e-16
+        ],
+        [
+          0.8546933590662165,
+          0.0,
+          0.5191331832662092
+        ]
+      ]
+    }
+  }
+}

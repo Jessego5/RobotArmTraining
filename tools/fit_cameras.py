@@ -85,10 +85,11 @@ def targets(frames_rgb, depth_model):
 class Scene:
     """The CAD two-arm scene posed from real states, rendering robot masks per camera."""
 
-    def __init__(self, setup: str = 'oct05'):
+    def __init__(self, setup: str = 'oct05', carrier: str = 'cad'):
+        """carrier: 'real' for the machined carrier of the recordings (sim/bimanual_cad.py)."""
         from sim.bimanual_cad import build_scene
         from sim.panthera_env import ARM_JOINTS
-        self.model = mujoco.MjModel.from_xml_path(str(build_scene('original')))
+        self.model = mujoco.MjModel.from_xml_path(str(build_scene('original', carrier)))
         m = self.model
         self.data = mujoco.MjData(m)
         body = lambda name: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name)

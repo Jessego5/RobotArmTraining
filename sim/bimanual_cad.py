@@ -20,6 +20,7 @@ converts to the real dataset's radians.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import tempfile
@@ -69,7 +70,42 @@ def _shift(element, offset):
     element.set('pos', _vec(pos))
 
 
-def build_scene(overhead_setup: str = 'after_oct2') -> str:
+def _real_carrier(root):
+    """Swap Zeb's plain CAD carrier for the machined one measured from the October 30-31
+    videos (tools/make_real_carrier.py): same frame, smaller, with a bearing."""
+    folder = ASSETS / 'meshes/large_carrier_real'
+    info = json.loads((folder / 'carrier.json').read_text())
+    asset = root.find('asset')
+    for mesh in list(asset.findall('mesh')):
+        if mesh.get('name', '').startswith('large_carrier_'):
+            asset.remove(mesh)
+    body = root.find(".//body[@name='large_carrier']")
+    template = body.find("geom[@name='large_carrier_col_000']")
+    for geom in list(body.findall('geom')):
+        body.remove(geom)
+    ET.SubElement(asset, 'mesh', name='large_carrier_visual', file='meshes/large_carrier_real/visual.stl')
+    ET.SubElement(asset, 'mesh', name='large_carrier_bearing', file='meshes/large_carrier_real/bearing.stl')
+    rgba = PART_RGBA['large_carrier']
+    ET.SubElement(body, 'geom', name='large_carrier_visual', type='mesh', mesh='large_carrier_visual', contype='0',
+                  conaffinity='0', group='2', rgba=rgba, density='0')
+    ET.SubElement(body, 'geom', name='large_carrier_bearing', type='mesh', mesh='large_carrier_bearing', contype='0',
+                  conaffinity='0', group='2', rgba='.42 .43 .46 1', density='0')
+    ET.SubElement(body, 'geom', name='large_carrier_table_contact', type='mesh', mesh='large_carrier_visual',
+                  contype='4', conaffinity='8', group='3', density='0', friction=template.get('friction'))
+    for k in range(info['collision_pieces']):
+        ET.SubElement(asset, 'mesh', name=f'large_carrier_col_{k:03d}', file=f'meshes/large_carrier_real/collision_{k:03d}.stl')
+        geom = copy.deepcopy(template)
+        geom.set('name', f'large_carrier_col_{k:03d}'); geom.set('mesh', f'large_carrier_col_{k:03d}')
+        body.append(geom)
+    inertial = body.find('inertial')
+    scale = info['mass_kg'] / float(inertial.get('mass'))
+    inertial.set('mass', str(info['mass_kg']))
+    inertial.set('pos', _vec(info['centre_of_mass']))
+    inertial.set('diaginertia', _vec(np.array(inertial.get('diaginertia').split(), float) * scale))
+
+
+def build_scene(overhead_setup: str = 'after_oct2', carrier: str = 'cad') -> str:
+    """carrier: 'cad' (Zeb's Onshape part) or 'real' (the machined one in the recordings)."""
     overhead = OVERHEAD_SETUPS[overhead_setup]
     root = ET.parse(ASSETS / 'scene_pins.xml').getroot()
     root.set('model', 'panthera_bimanual_cad_parallel')
@@ -88,6 +124,8 @@ def build_scene(overhead_setup: str = 'after_oct2') -> str:
     for element in list(world):
         if element.tag in ('light', 'camera') or element.get('name', '').endswith('_rack'):
             world.remove(element)
+    if carrier == 'real':
+        _real_carrier(root)
     # Real-matched table: varnished, large, under both bases.
     asset = root.find('asset')
     ET.SubElement(asset, 'material', name='table', rgba='.80 .62 .40 1', specular='.6', shininess='.9')
@@ -164,7 +202,7 @@ def build_scene(overhead_setup: str = 'after_oct2') -> str:
     ET.SubElement(ET.SubElement(root, 'keyframe'), 'key', name='home',
                   qpos=_vec(home + free + home), ctrl=_vec(home[:7] + home[:7]))
     ET.indent(root)
-    path = ASSETS / f'scene_bimanual_parallel_{overhead_setup}.xml'
+    path = ASSETS / f'scene_bimanual_parallel_{overhead_setup}{"_real" if carrier == "real" else ""}.xml'
     with tempfile.NamedTemporaryFile(mode='w', dir=ASSETS, suffix='.xml', delete=False) as f:
         temporary = f.name
         ET.ElementTree(root).write(f, encoding='unicode')
