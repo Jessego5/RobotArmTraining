@@ -24,8 +24,8 @@ post screws at 21.2 mm on the diagonals (+-1: the sockets'
 shadows blur them; the planet gear clears the posts by 0.5 mm), small holes 2.6 mm at 12.5 mm radius, 16
 degrees before each planet hole. Kept from the CAD, which the camera cannot check:
 the plate heights (bottom 0-3 mm, top 14.2-17.2 mm, bosses to 19.2 mm), the planet
-holes (8.2 mm, which the 8 mm pin needs), the post diameter and the bottom plate's
-35.5 mm opening. The bearing is modelled only within the top plate's thickness
+holes (8.2 mm, which the 8 mm pin needs, through both plates: the seated pin reaches
+0.5 mm above the bottom face), the post diameter and the bottom plate's 35.5 mm opening. The bearing is modelled only within the top plate's thickness
 (its real depth is unknown; 7 mm would reach the planet gear's layer). The curved
 pockets machined into the face are not modelled.
 
@@ -81,7 +81,7 @@ def layers(p=DIMS):
         boss.append(unary_union([disc(p['boss_w'], polar(p['post_r'], a)), run]))
     boss = unary_union(boss).intersection(disc(p['outer_d'] + .2)).difference(screw)
     return {
-        'bottom': (plate.difference(disc(p['bottom_open_d'])).difference(screw), *p['bottom']),
+        'bottom': (plate.difference(disc(p['bottom_open_d'])).difference(planet).difference(screw), *p['bottom']),
         'posts': (unary_union([disc(p['post_d'], c) for c in posts]).difference(screw), *p['posts']),
         'top': (plate.difference(disc(p['bearing_od'])).difference(planet).difference(small).difference(screw), *p['top']),
         'bosses': (boss, *p['bosses']),

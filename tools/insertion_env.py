@@ -72,17 +72,19 @@ class GearInsertionEnv:
     CATCH_MM = 8.  # how far out of its slot the press fit catches a released part
 
     def __init__(self, root=ROOT / 'outputs/real_gear', episodes=None, noise_mm=4., noise_deg=6., seed=0,
-                 lead_s=2., cameras=ROOT / 'sim/real_cameras.json', grips=None):
+                 lead_s=2., cameras=ROOT / 'sim/real_cameras.json', grips=None, calibration=None, carrier='cad'):
         """grips: a grasp file (tools/physics_replay.py format) for the carrier and gear; by
-        default CARRIER_GRIP and Zeb's gear grip."""
+        default CARRIER_GRIP and Zeb's gear grip. calibration: joint offsets, the right base
+        and grips (sim/real_calibration_oct30.json), applied to the starts; its grips override
+        `grips`. carrier: 'cad' or 'real'."""
         from tools.augment_real_dataset import episode_rows
-        self.replay = r = PhysicsReplay(Path(cameras), exclude_left=False)
+        self.replay = r = PhysicsReplay(Path(cameras), exclude_left=False, calibration=calibration, carrier=carrier)
         self.m, self.d = r.model, r.data
         self.rng = np.random.default_rng(seed)
         self.noise_mm, self.noise_deg = noise_mm, noise_deg
-        held = grasps(Path(grips) if grips else ROOT / 'none')
+        held = {**grasps(Path(grips) if grips else ROOT / 'none'), **(r.grips or {})}
         self.part_grip = held[self.PART]
-        self.base_carrier_grip = held['large_carrier'] if grips else CARRIER_GRIP
+        self.base_carrier_grip = held['large_carrier'] if grips or r.grips else CARRIER_GRIP
         self.slot = np.eye(4)
         self.slot[:3, 3] = assembled_offsets()[self.PART]
         info = json.loads((Path(root) / 'meta/info.json').read_text())
@@ -92,7 +94,7 @@ class GearInsertionEnv:
             st = numeric['observation.state'].astype(np.float64)
             g = next((s for s in phases(st)['left'] if s['phase'] == self.HOLD_PHASE), None)
             if g is not None and g['stop'] - 1 - round(lead_s * 20) > g['start']:
-                self.starts.append(st[g['stop'] - 1 - round(lead_s * 20)])
+                self.starts.append(st[g['stop'] - 1 - round(lead_s * 20)] + r.offsets)
         m = self.m
         self.left_dofs = np.array([m.jnt_dofadr[m.joint(j).id] for j in
                                    ('joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6')])
@@ -265,14 +267,22 @@ class GearInsertionEnv:
             if np.linalg.norm(lead) > .003 and world @ lead > 0:
                 world -= (world @ lead) / (lead @ lead) * lead
             target[:3, 3] += world
-            target[:3, :3] = carrier[:3, :3] @ Rotation.from_rotvec(turn).as_matrix() @ carrier[:3, :3].T @ grip[:3, :3]
-            # At most 0.03 rad per joint per step: an unreachable target must not fling the gear.
-            q_new = self.q + np.clip(self.ik(target, self.q) - self.q, -.03, .03)
-            # Backstop: a rotation or IK step must not sink the fingertips or gear well below the floor.
-            q_old, self.q = self.q, q_new
-            tip = self.commanded_grip()
-            low = min(tip[2, 3], (tip @ self.part_grip)[2, 3] if not self.released else np.inf)
-            if low < TABLE_Z + FLOOR - .003:
+            # Backstop: a rotation or IK step must not sink the fingertips or gear well below the
+            # floor (one that starts below it may still climb). A step the rotation sinks is
+            # tried again without it, so the move still happens.
+            q_old = self.q
+            for rotation in (Rotation.from_rotvec(turn).as_matrix(), np.eye(3)):
+                target[:3, :3] = carrier[:3, :3] @ rotation @ carrier[:3, :3].T @ grip[:3, :3]
+                # At most 0.03 rad per joint per step: an unreachable target must not fling the gear.
+                # The whole step is scaled down, not each joint clipped: clipping some joints of a
+                # tilt correction bends the hand's path (it sank 4 mm every few steps, the tilt stuck).
+                dq = self.ik(target, q_old) - q_old
+                self.q = q_old + dq * min(1., .03 / max(np.abs(dq).max(), 1e-9))
+                tip = self.commanded_grip()
+                new_low = min(tip[2, 3], (tip @ self.part_grip)[2, 3] if not self.released else np.inf)
+                if not (new_low < TABLE_Z + FLOOR - .003 and new_low < low):
+                    break
+            else:
                 self.q = q_old
             if action[6] > 0 and not self.released:
                 self.released, self.released_t = True, self.t

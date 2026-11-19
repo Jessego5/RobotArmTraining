@@ -100,15 +100,19 @@ class PhysicsReplay:
     # carrier and the other part touch but the left gripper does not.
     LEFT_FINGERS, LEFT_AFFINITY, HELD = 16, 1 | 2 | 8, 32
 
-    def __init__(self, cameras: Path, exclude_left=True, compliant=False):
+    def __init__(self, cameras: Path, exclude_left=True, compliant=False, calibration: Path | None = None,
+                 carrier='cad'):
         """exclude_left: the gear and pin never collide with the left gripper (replay); the
         insertion environment instead switches that on at release, to push with the fingertips.
         compliant: soft holds near the slots, fingertip pushes after release and press fits
-        (see the module docstring); implies exclude_left=False."""
+        (see the module docstring); implies exclude_left=False.
+        calibration: joint offsets and the right base (sim/real_calibration_oct30.json), in
+        place of the cameras' base; its grips are self.grips.
+        carrier: 'cad' or 'real' (the machined carrier, tools/make_real_carrier.py)."""
         self.compliant = compliant
         exclude_left = exclude_left and not compliant
         from sim.bimanual_cad import build_scene
-        spec = mujoco.MjSpec.from_file(str(build_scene('original')))
+        spec = mujoco.MjSpec.from_file(str(build_scene('original', carrier)))
         for name in PARTS:  # a mocap handle per part and a weld to it, off until the part is held
             spec.worldbody.add_body(name=f'hold_{name}', mocap=True)
             spec.add_equality(type=mujoco.mjtEq.mjEQ_WELD, name1=name, name2=f'hold_{name}',
@@ -125,6 +129,12 @@ class PhysicsReplay:
         self.data = d = mujoco.MjData(m)
         # The right base where the clicked-fingertip overhead solve puts it.
         dx, dy, dyaw = list(json.loads(cameras.read_text())['overhead']['params'].values())[10:13]
+        self.offsets, self.grips = np.zeros(14), None
+        if calibration:
+            c = json.loads(Path(calibration).read_text())
+            dx, dy, dyaw = c['right_base']
+            self.offsets[:6], self.offsets[7:13] = np.radians(c['left_joint_offsets_deg']), np.radians(c['right_joint_offsets_deg'])
+            self.grips = {name: transform(g['offset'], g['rotation']) for name, g in c['grips'].items()}
         base = m.body('right_base').id
         m.body_pos[base] += [dx, dy, 0]
         w, x, y, z = m.body_quat[base]
@@ -153,6 +163,10 @@ class PhysicsReplay:
             self.set_left_fingers()
             self.part_geoms = {n: self.pieces(n) for n in ('gear_3', 'pin_2')}
             self.soften_right_fingers()
+            # The table's friction, not the finger pads' (2.0, for holding by friction): pads
+            # dragged along the table at that friction pin the arm down where the operator lifted.
+            table = m.geom('table_top').id
+            m.geom_priority[table], m.geom_friction[table, 0] = 5, .4
 
     def set_left_fingers(self):
         m = self.model
@@ -246,7 +260,8 @@ class PhysicsReplay:
         if self.compliant:
             for name in self.part_geoms:
                 self.set_held(name, True)
-        segments = phases(states)
+        segments = phases(states)  # from the recorded gripper readings, before the joint offsets
+        states, actions = states + self.offsets, actions + self.offsets
         holds = {}
         for name, (side, phase) in HOLDS.items():
             g = next((s for s in segments[side] if s['phase'] == phase), None)
@@ -332,11 +347,14 @@ def main():
     parser.add_argument('--output', type=Path, default=ROOT / 'outputs/physics_replay.json')
     parser.add_argument('--cameras', type=Path, default=ROOT / 'sim/real_cameras.json',
                         help='fitted cameras (their overhead solve places the right base)')
+    parser.add_argument('--calibration', type=Path, help='arm calibration (sim/real_calibration_oct30.json): joint '
+                        'offsets, the right base and the part grips (it overrides --grasps)')
+    parser.add_argument('--carrier', choices=('cad', 'real'), default='cad')
     parser.add_argument('--compliant', action='store_true',
                         help='soft holds near the slots, fingertip pushes and press fits (module docstring)')
     args = parser.parse_args()
-    replay = PhysicsReplay(args.cameras, compliant=args.compliant)
-    grips, targets = grasps(args.grasps), assembled_offsets()
+    replay = PhysicsReplay(args.cameras, compliant=args.compliant, calibration=args.calibration, carrier=args.carrier)
+    grips, targets = replay.grips or grasps(args.grasps), assembled_offsets()
     results = {}
     for episode in args.episodes:
         numeric, _ = episode_rows(args.root, episode)

@@ -1,25 +1,25 @@
 {
-  "about": "October 30-31 recordings: joint zero offsets (deg, added to the recorded angles), the right base placement (dx, dy m and yaw deg from the layout, as tools/fit_cameras.py Scene.set_right_base) and the part grips. Fitted so every gear and pin release puts the part in its slot and every press puts the fingertips on the pin head, with the gear held by its rim and the pin 12.7 mm from its tip between the finger pads: median 3.4, 3.7 and 5.9 mm over 18 demos, from 8.5, 8.4 and 12.0. The carrier grip is from the right wrist camera, which confirms the calibrated left fingertip positions (not used in the fit).",
+  "about": "October 30-31 recordings: joint zero offsets (deg, added to the recorded angles), the right base placement (dx, dy m and yaw deg from the layout, as tools/fit_cameras.py Scene.set_right_base) and the part grips. Fitted so every gear and pin release puts the part in its slot, every press puts the fingertips on the pin head, the gear and pin lie on the table when the fingers close on them and the finger pads stay out of the table, with the gear held by its rim and the pin 12.7 mm from its tip between the pads: median 4.0, 3.8 and 4.7 mm over 18 demos (from 12.4, 9.6 and 12.0), parts 2.1 and 1.6 mm off the table at the grab, pads at most 1.6 mm into it. The contacts alone do not fix the arms' height (both arms can drop together), hence the table terms; priors keep the base within a few cm of the overhead camera's and the carrier's tilt in the hand (from the right wrist camera) within a few degrees.",
   "left_joint_offsets_deg": [
-    -0.0005343994907782174,
-    1.866149853329932,
-    0.5875442911782386,
-    -1.8346943915145455,
-    2.2975271742460457,
-    -1.0238439256687462
+    3.4256086046184535,
+    0.06879517614833362,
+    -0.3923474717748921,
+    -2.6161112449306536,
+    4.799576094065516,
+    -2.4767767541001704
   ],
   "right_joint_offsets_deg": [
-    -0.00017060657395276204,
-    1.6673855318561954,
-    -1.705687119233124,
-    0.7147205729563312,
-    1.3440275958404326,
-    2.1456784962332622
+    -1.0286441070354628,
+    1.662128679043528,
+    -1.5839449773439025,
+    1.3352273930816594,
+    0.6502003253658513,
+    4.718521723045921
   ],
   "right_base": [
-    -0.02767415430157921,
-    -0.011863365897302667,
-    -1.6352014821657082
+    -0.00798311016689766,
+    -0.010629592102041435,
+    2.34631831667973
   ],
   "grips": {
     "large_carrier": {
@@ -30,33 +30,33 @@
       ],
       "rotation": [
         [
-          -0.6195060587997983,
-          0.31969516827499883,
-          -0.7169429841291155
+          -0.5436765234368132,
+          0.3976192803228209,
+          -0.7391310748299125
         ],
         [
-          -0.4695252404468499,
-          -0.8828368958087628,
-          0.012044250996869217
+          -0.46832929647072846,
+          -0.8745277847616565,
+          -0.12597151958717567
         ],
         [
-          -0.629093229731229,
-          0.3440843134761711,
-          0.6970277566395497
+          -0.6964793664789305,
+          0.2776689784535384,
+          0.6616769834848997
         ]
       ]
     },
     "gear_3": {
       "offset": [
-        0.00454580752474788,
+        0.006534976603756284,
         0.0,
-        0.011809396191460167
+        0.007554338606314578
       ],
       "rotation": [
         [
-          0.681619374056943,
+          0.9055584884032108,
           0.0,
-          -0.7317069282918002
+          -0.42422143284008185
         ],
         [
           0.0,
@@ -64,33 +64,33 @@
           0.0
         ],
         [
-          0.7317069282918002,
+          0.42422143284008185,
           0.0,
-          0.6816193740569427
+          0.9055584884032107
         ]
       ]
     },
     "pin_2": {
       "offset": [
-        0.009854605660140946,
+        0.008534554599091929,
         0.0,
-        -0.009639739672016156
+        -0.01147431685154472
       ],
       "rotation": [
         [
-          0.5191331832662094,
+          0.6605837857856283,
           0.0,
-          -0.8546933590662164
+          -0.7507523306371597
         ],
         [
           0.0,
-          0.9999999999999999,
-          2.220446049250313e-16
+          1.0,
+          0.0
         ],
         [
-          0.8546933590662165,
+          0.7507523306371597,
           0.0,
-          0.5191331832662092
+          0.6605837857856283
         ]
       ]
     }
